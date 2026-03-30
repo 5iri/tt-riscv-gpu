@@ -63,7 +63,8 @@ module mac_core #(
     reg [ROW_W-1:0]     pe_row   [0:PE-1];
     reg [ROW_W-1:0]     pe_col   [0:PE-1];
 
-    integer i, j, p;
+    integer i, j;
+    integer p_comb, p_seq;
     integer flat_idx;
 
     // Combinational read
@@ -75,25 +76,25 @@ module mac_core #(
 
     // Per-lane ternary add/sub datapath
     always @(*) begin
-        for (p = 0; p < PE; p = p + 1) begin
-            flat_idx = co + p;
-            pe_valid[p] = (flat_idx < OUTS);
-            pe_row[p]   = {ROW_W{1'b0}};
-            pe_col[p]   = {ROW_W{1'b0}};
-            pe_term[p]  = {CW{1'b0}};
-            pe_next[p]  = acc[p];
+        for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
+            flat_idx = co + p_comb;
+            pe_valid[p_comb] = (flat_idx < OUTS);
+            pe_row[p_comb]   = {ROW_W{1'b0}};
+            pe_col[p_comb]   = {ROW_W{1'b0}};
+            pe_term[p_comb]  = {CW{1'b0}};
+            pe_next[p_comb]  = acc[p_comb];
 
-            if (pe_valid[p]) begin
-                pe_row[p] = flat_idx / N;
-                pe_col[p] = flat_idx % N;
+            if (pe_valid[p_comb]) begin
+                pe_row[p_comb] = flat_idx / N;
+                pe_col[p_comb] = flat_idx % N;
 
-                case (b_spm[ck][pe_col[p]])
-                    2'b01: pe_term[p] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p]][ck]});
-                    2'b10: pe_term[p] = -$signed({{(CW-DW){1'b0}}, a_spm[pe_row[p]][ck]});
-                    default: pe_term[p] = {CW{1'b0}};
+                case (b_spm[ck][pe_col[p_comb]])
+                    2'b01: pe_term[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    2'b10: pe_term[p_comb] = -$signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    default: pe_term[p_comb] = {CW{1'b0}};
                 endcase
 
-                pe_next[p] = acc[p] + pe_term[p];
+                pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
         end
     end
@@ -113,8 +114,8 @@ module mac_core #(
                     c_spm[i][j] <= {CW{1'b0}};
                 end
 
-            for (p = 0; p < PE; p = p + 1)
-                acc[p] <= {CW{1'b0}};
+            for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
+                acc[p_seq] <= {CW{1'b0}};
         end else begin
             done <= 1'b0;
 
@@ -132,8 +133,8 @@ module mac_core #(
                         busy <= 1'b1;
                         ck   <= {ROW_W{1'b0}};
                         co   <= {OUT_W{1'b0}};
-                        for (p = 0; p < PE; p = p + 1)
-                            acc[p] <= {CW{1'b0}};
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
+                            acc[p_seq] <= {CW{1'b0}};
                         state <= ST_COMPUTE;
                     end
                 end
@@ -141,10 +142,10 @@ module mac_core #(
                 ST_COMPUTE: begin
                     if (ck == N[ROW_W-1:0] - 1'b1) begin
                         // Dot-product end for all active lanes: store and reset lane accumulators.
-                        for (p = 0; p < PE; p = p + 1) begin
-                            if (pe_valid[p])
-                                c_spm[pe_row[p]][pe_col[p]] <= pe_next[p];
-                            acc[p] <= {CW{1'b0}};
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                            if (pe_valid[p_seq])
+                                c_spm[pe_row[p_seq]][pe_col[p_seq]] <= pe_next[p_seq];
+                            acc[p_seq] <= {CW{1'b0}};
                         end
 
                         ck <= {ROW_W{1'b0}};
@@ -158,11 +159,11 @@ module mac_core #(
                         end
                     end else begin
                         ck <= ck + 1'b1;
-                        for (p = 0; p < PE; p = p + 1) begin
-                            if (pe_valid[p])
-                                acc[p] <= pe_next[p];
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                            if (pe_valid[p_seq])
+                                acc[p_seq] <= pe_next[p_seq];
                             else
-                                acc[p] <= {CW{1'b0}};
+                                acc[p_seq] <= {CW{1'b0}};
                         end
                     end
                 end
