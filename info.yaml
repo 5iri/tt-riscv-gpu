@@ -1,9 +1,9 @@
 # Tiny Tapeout project information
 project:
-  title:        "4x4 uint8 Matrix Multiply Accelerator"
+  title:        "4x4 Ternary-Weight Matrix Multiply Accelerator"
   author:       "siriboi"
   discord:      ""
-  description:  "SPI-controlled 4x4 unsigned 8-bit single-MAC matrix multiply accelerator"
+  description:  "SPI-controlled 4x4 uint8 x ternary accelerator with multiplier-free PE-parallel MAC"
   language:     "Verilog"
   clock_hz:     50000000
 

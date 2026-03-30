@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// TinyTapeout top wrapper for 4x4 uint8 single-MAC accelerator with SPI.
+// TinyTapeout top wrapper for 4x4 uint8 x ternary-weight accelerator with SPI.
 //
 // Pin map:
 //   ui_in[0]  = SPI SCLK
@@ -18,7 +18,7 @@
 //
 // SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
 //   SEL 00 = write matrix A element   (1 data byte)
-//   SEL 01 = write matrix B element   (1 data byte)
+//   SEL 01 = write matrix B element   (1 data byte, bits [1:0] used: 00=0,01=+1,10=-1)
 //   SEL 10 = control / status
 //            write: bit 0 = start      (1 data byte)
 //            read:  {6'b0, done, busy}  (1 byte out)
@@ -147,11 +147,14 @@ module tt_um_riscv_gpu (
         .rd_data   (rd_data)
     );
 
-    // --- MAC core (single 4x4 unsigned, 64-cycle matmul) ---
+    localparam CORE_PE = 2;
+
+    // --- MAC core (ternary-weight, PE-parallel) ---
     mac_core #(
         .N  (4),
         .DW (8),
-        .CW (20)
+        .CW (20),
+        .PE (CORE_PE)
     ) u_core (
         .clk       (clk),
         .rst       (rst),

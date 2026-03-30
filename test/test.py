@@ -3,13 +3,30 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles
 
 # SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
-# SEL: 00=A, 01=B, 10=ctrl/status, 11=C
+# SEL: 00=A, 01=B(2-bit ternary), 10=ctrl/status, 11=C
 
 def make_cmd(rw, sel, row, col):
     return ((rw & 1) << 7) | ((sel & 3) << 5) | ((row & 3) << 3) | ((col & 3) << 1)
+
+
+def encode_ternary_weight(value):
+    """Encode ternary weight {-1, 0, +1} into 2-bit code."""
+    if value == 0:
+        return 0x00  # 00
+    if value == 1:
+        return 0x01  # 01
+    if value == -1:
+        return 0x02  # 10
+    raise ValueError(f"Unsupported ternary value {value}, expected -1/0/1")
+
+
+def to_signed(value, width):
+    """Interpret unsigned integer as signed two's-complement with 'width' bits."""
+    sign_bit = 1 << (width - 1)
+    return (value ^ sign_bit) - sign_bit
 
 # Pin indices within ui_in
 SCLK_BIT = 0
@@ -103,18 +120,21 @@ async def _spi_read_byte(dut):
 
 
 async def spi_write_matrix(dut, sel, matrix):
-    """Write a 4x4 matrix (sel=0 for A, sel=1 for B)."""
+    """Write a 4x4 matrix (sel=0 for uint8 A, sel=1 for ternary B)."""
     for r in range(4):
         for c in range(4):
             cmd = make_cmd(0, sel, r, c)
-            await spi_transfer(dut, cmd, write_bytes=[matrix[r][c]])
+            value = matrix[r][c]
+            if sel == 1:
+                value = encode_ternary_weight(value)
+            await spi_transfer(dut, cmd, write_bytes=[value & 0xFF])
 
 
 async def spi_read_c(dut, row, col):
-    """Read a 20-bit C element (returned as 3 bytes, top 4 bits zero-padded)."""
+    """Read a 20-bit C element payload from 3 SPI bytes."""
     cmd = make_cmd(1, 3, row, col)
     result = await spi_transfer(dut, cmd, read_count=3)
-    return (result[0] << 16) | (result[1] << 8) | result[2]
+    return ((result[0] << 16) | (result[1] << 8) | result[2]) & ((1 << 20) - 1)
 
 
 async def spi_start(dut):
@@ -131,7 +151,7 @@ async def spi_read_status(dut):
 
 
 def matmul_4x4(a, b):
-    """Reference 4x4 matrix multiply."""
+    """Reference 4x4 matrix multiply (supports signed ternary B)."""
     c = [[0]*4 for _ in range(4)]
     for i in range(4):
         for j in range(4):
@@ -163,7 +183,7 @@ async def test_identity(dut):
          [9, 10, 11, 12],
          [13, 14, 15, 16]]
 
-    # B = identity
+    # B = ternary identity
     B = [[1, 0, 0, 0],
          [0, 1, 0, 0],
          [0, 0, 1, 0],
@@ -190,7 +210,8 @@ async def test_identity(dut):
     dut._log.info("Reading results")
     for i in range(4):
         for j in range(4):
-            val = await spi_read_c(dut, i, j)
+            raw = await spi_read_c(dut, i, j)
+            val = to_signed(raw, 20)
             dut._log.info(f"C[{i}][{j}] = {val} (expected {expected[i][j]})")
             assert val == expected[i][j], f"C[{i}][{j}]: got {val}, expected {expected[i][j]}"
 
@@ -219,10 +240,10 @@ async def test_matmul(dut):
          [3, 7, 2, 1],
          [0, 6, 4, 3]]
 
-    B = [[1, 0, 3, 2],
-         [2, 5, 1, 0],
-         [4, 1, 0, 3],
-         [0, 2, 1, 1]]
+    B = [[1,  0, -1,  1],
+         [0,  1,  1, -1],
+         [-1, 1,  0,  1],
+         [1, -1,  1,  0]]
 
     expected = matmul_4x4(A, B)
 
@@ -240,7 +261,8 @@ async def test_matmul(dut):
 
     for i in range(4):
         for j in range(4):
-            val = await spi_read_c(dut, i, j)
+            raw = await spi_read_c(dut, i, j)
+            val = to_signed(raw, 20)
             assert val == expected[i][j], f"C[{i}][{j}]: got {val}, expected {expected[i][j]}"
 
     dut._log.info("Matmul test PASSED")
