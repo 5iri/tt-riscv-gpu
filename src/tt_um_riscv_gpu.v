@@ -87,7 +87,7 @@ module tt_um_riscv_gpu (
     // --- Read data mux (combinational, feeds SPI shift-out) ---
     always @(*) begin
         case (cmd_sel)
-            2'b10:   rd_data = {16'b0, 6'b0, done_sticky, core_busy};
+            2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
             2'b11:   rd_data = {4'b0, core_c_data};
             default: rd_data = 24'b0;
         endcase
