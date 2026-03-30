@@ -70,7 +70,7 @@ module tt_um_riscv_gpu (
     reg         core_start;
     wire        core_busy;
     wire        core_done;
-    wire [19:0] core_c_data;
+    wire [11:0] core_c_data;
 
     // --- Sticky done flag ---
     reg done_sticky;
@@ -88,7 +88,7 @@ module tt_um_riscv_gpu (
     always @(*) begin
         case (cmd_sel)
             2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
-            2'b11:   rd_data = {4'b0, core_c_data};
+            2'b11:   rd_data = {{12{core_c_data[11]}}, core_c_data};
             default: rd_data = 24'b0;
         endcase
     end
@@ -153,7 +153,7 @@ module tt_um_riscv_gpu (
     mac_core #(
         .N  (4),
         .DW (8),
-        .CW (20),
+        .CW (12),
         .PE (CORE_PE)
     ) u_core (
         .clk       (clk),

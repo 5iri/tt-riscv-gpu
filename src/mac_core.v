@@ -13,7 +13,7 @@
 module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 20,
+    parameter CW = 12,
     parameter PE = 2
 ) (
     input  wire                   clk,
@@ -65,7 +65,7 @@ module mac_core #(
 
     integer i, j;
     integer p_comb, p_seq;
-    integer flat_idx;
+    reg [OUT_W:0] flat_idx;
 
     // Combinational read
     always @(*) begin
@@ -77,7 +77,7 @@ module mac_core #(
     // Per-lane ternary add/sub datapath
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
-            flat_idx = co + p_comb;
+            flat_idx = {1'b0, co} + p_comb;
             pe_valid[p_comb] = (flat_idx < OUTS);
             pe_row[p_comb]   = {ROW_W{1'b0}};
             pe_col[p_comb]   = {ROW_W{1'b0}};
@@ -85,8 +85,9 @@ module mac_core #(
             pe_next[p_comb]  = acc[p_comb];
 
             if (pe_valid[p_comb]) begin
-                pe_row[p_comb] = flat_idx / N;
-                pe_col[p_comb] = flat_idx % N;
+                // N is fixed at 4 for this design: decode row/col from flat index bits.
+                pe_row[p_comb] = flat_idx[OUT_W-1:ROW_W];
+                pe_col[p_comb] = flat_idx[ROW_W-1:0];
 
                 case (b_spm[ck][pe_col[p_comb]])
                     2'b01: pe_term[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
