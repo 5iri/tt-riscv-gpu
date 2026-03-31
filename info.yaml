@@ -1,14 +1,14 @@
 # Tiny Tapeout project information
 project:
-  title:        "4x4 Ternary-Weight Matrix Multiply Accelerator"
+  title:        "4x4 uint8 Matrix Multiply Accelerator"
   author:       "siriboi"
   discord:      ""
-  description:  "SPI-controlled 4x4 uint8 x ternary accelerator with multiplier-free PE-parallel MAC"
+  description:  "SPI-controlled 4x4 uint8 x uint8 matrix multiply accelerator with PE-parallel MAC and 18-bit accumulator"
   language:     "Verilog"
   clock_hz:     50000000
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x2"
+  tiles: "2x2"
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_riscv_gpu"
