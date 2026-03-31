@@ -8,7 +8,7 @@ module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
     parameter CW = 18,
-    parameter PE = 4
+    parameter PE = 2
 ) (
     input  wire                   clk,
     input  wire                   rst,
