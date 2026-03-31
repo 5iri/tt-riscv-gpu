@@ -54,7 +54,7 @@ module tt_um_riscv_gpu (
     wire [7:0]  cmd_byte;
     wire        wr_valid;
     wire [7:0]  wr_byte;
-    reg  [23:0] rd_data;
+    wire [23:0] rd_data;
 
     // --- Command decode ---
     wire       cmd_is_read = cmd_byte[7];
@@ -89,13 +89,9 @@ module tt_um_riscv_gpu (
     end
 
     // --- Read data mux (combinational, feeds SPI shift-out) ---
-    always @(*) begin
-        case (cmd_sel)
-            2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
-            2'b11:   rd_data = {{11{core_c_data[12]}}, core_c_data};
-            default: rd_data = 24'b0;
-        endcase
-    end
+    assign rd_data = (cmd_sel == 2'b10) ? {6'b0, done_sticky, core_busy, 16'b0} :
+                     (cmd_sel == 2'b11) ? {{11{core_c_data[12]}}, core_c_data} :
+                                          24'b0;
 
     // --- Write handling ---
     // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
