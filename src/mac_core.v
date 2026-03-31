@@ -80,32 +80,35 @@ module mac_core #(
 
     // Per-lane 3-bit weight datapath: shift-add for magnitude, negate for sign (no multiplier)
     reg signed [CW-1:0] pe_scaled [0:PE-1];
+    reg [2:0]           b_val     [0:PE-1];
 
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
             flat_idx = {1'b0, co} + p_comb;
-            pe_valid[p_comb] = (flat_idx < OUTS);
-            pe_row[p_comb]   = {ROW_W{1'b0}};
-            pe_col[p_comb]   = {ROW_W{1'b0}};
+            pe_valid[p_comb]  = (flat_idx < OUTS);
+            pe_row[p_comb]    = {ROW_W{1'b0}};
+            pe_col[p_comb]    = {ROW_W{1'b0}};
+            b_val[p_comb]     = 3'b000;
             pe_scaled[p_comb] = {CW{1'b0}};
-            pe_term[p_comb]  = {CW{1'b0}};
-            pe_next[p_comb]  = acc[p_comb];
+            pe_term[p_comb]   = {CW{1'b0}};
+            pe_next[p_comb]   = acc[p_comb];
 
             if (pe_valid[p_comb]) begin
                 pe_row[p_comb] = flat_idx[OUT_W-1:ROW_W];
                 pe_col[p_comb] = flat_idx[ROW_W-1:0];
+                b_val[p_comb]  = b_spm[ck][pe_col[p_comb]];
 
                 // Scale by magnitude (bits[1:0]) using shifts and add
-                case (b_spm[ck][pe_col[p_comb]][1:0])
-                    2'b01: pe_scaled[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                case (b_val[p_comb][1:0])
+                    2'b01: pe_scaled[p_comb] = $signed({{(CW-DW){1'b0}},   a_spm[pe_row[p_comb]][ck]});
                     2'b10: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0});
                     2'b11: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0})
-                                             + $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                                             + $signed({{(CW-DW){1'b0}},   a_spm[pe_row[p_comb]][ck]});
                     default: pe_scaled[p_comb] = {CW{1'b0}};
                 endcase
 
                 // Apply sign (bit[2])
-                pe_term[p_comb] = b_spm[ck][pe_col[p_comb]][2] ? -pe_scaled[p_comb] : pe_scaled[p_comb];
+                pe_term[p_comb] = b_val[p_comb][2] ? -pe_scaled[p_comb] : pe_scaled[p_comb];
 
                 pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
