@@ -66,6 +66,7 @@ module mac_core #(
     reg [ROW_W-1:0]     pe_row   [0:PE-1];
     reg [ROW_W-1:0]     pe_col   [0:PE-1];
 
+
     integer i, j;
     integer p_comb, p_seq;
     reg [OUT_W:0] flat_idx;
@@ -77,18 +78,19 @@ module mac_core #(
             c_rd_data = c_spm[c_rd_row][c_rd_col];
     end
 
-    // Per-lane 3-bit weight datapath: shift-add for magnitude, negate for sign (no multiplier)
-    reg signed [CW-1:0] pe_scaled [0:PE-1];
-    reg [2:0]           b_val     [0:PE-1];
+    // Per-lane 3-bit weight datapath: scale at narrow width, then extend and negate
+    // a_scaled is DW+2 bits wide: max A*3 = 255*3 = 765 < 2^10
+    reg [DW+1:0] a_scaled [0:PE-1];
+    reg [2:0]    b_val    [0:PE-1];
 
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
-            flat_idx = {1'b0, co} + p_comb;
+            flat_idx = {1'b0, co} + p_comb[0];
             pe_valid[p_comb]  = (flat_idx < OUTS);
             pe_row[p_comb]    = {ROW_W{1'b0}};
             pe_col[p_comb]    = {ROW_W{1'b0}};
             b_val[p_comb]     = 3'b000;
-            pe_scaled[p_comb] = {CW{1'b0}};
+            a_scaled[p_comb]  = {(DW+2){1'b0}};
             pe_term[p_comb]   = {CW{1'b0}};
             pe_next[p_comb]   = acc[p_comb];
 
@@ -97,17 +99,19 @@ module mac_core #(
                 pe_col[p_comb] = flat_idx[ROW_W-1:0];
                 b_val[p_comb]  = b_spm[ck][pe_col[p_comb]];
 
-                // Scale by magnitude (bits[1:0]) using shifts and add
+                // Step 1: scale at narrow (DW+2)-bit width — no wide adder needed
                 case (b_val[p_comb][1:0])
-                    2'b01: pe_scaled[p_comb] = $signed({{(CW-DW){1'b0}},   a_spm[pe_row[p_comb]][ck]});
-                    2'b10: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0});
-                    2'b11: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0})
-                                             + $signed({{(CW-DW){1'b0}},   a_spm[pe_row[p_comb]][ck]});
-                    default: pe_scaled[p_comb] = {CW{1'b0}};
+                    2'b01: a_scaled[p_comb] = {2'b0,  a_spm[pe_row[p_comb]][ck]};
+                    2'b10: a_scaled[p_comb] = {1'b0,  a_spm[pe_row[p_comb]][ck], 1'b0};
+                    2'b11: a_scaled[p_comb] = {1'b0,  a_spm[pe_row[p_comb]][ck], 1'b0}
+                                            + {2'b0,  a_spm[pe_row[p_comb]][ck]};
+                    default: a_scaled[p_comb] = {(DW+2){1'b0}};
                 endcase
 
-                // Apply sign (bit[2])
-                pe_term[p_comb] = b_val[p_comb][2] ? -pe_scaled[p_comb] : pe_scaled[p_comb];
+                // Step 2: zero-extend to CW, then negate for sign
+                pe_term[p_comb] = b_val[p_comb][2]
+                    ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]})
+                    :  $signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]});
 
                 pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
