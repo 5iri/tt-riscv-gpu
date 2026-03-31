@@ -1,19 +1,13 @@
 `timescale 1ns/1ps
 
-// Ternary-weight matrix multiply core for 4x4 uint8 A and 2-bit B.
-// B encoding:
-//   2'b00 =>  0
-//   2'b01 => +1
-//   2'b10 => -1
-//   2'b11 =>  0 (reserved -> treated as zero)
-//
-// Datapath removes multiplication and uses add/sub/skip only.
+// 8-bit unsigned matrix multiply core for 4x4 uint8 A and uint8 B.
+// C[i][j] = sum_k A[i][k] * B[k][j]  (unsigned, 18-bit accumulator)
 // Multiple output lanes (PE) run in parallel to improve throughput.
 
 module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 12,
+    parameter CW = 18,
     parameter PE = 2
 ) (
     input  wire                   clk,
@@ -48,7 +42,7 @@ module mac_core #(
 
     // Scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
-    reg [1:0]    b_spm [0:N-1][0:N-1];
+    reg [DW-1:0] b_spm [0:N-1][0:N-1];
     reg [CW-1:0] c_spm [0:N-1][0:N-1];
 
     // Loop counters
@@ -56,12 +50,12 @@ module mac_core #(
     reg [OUT_W-1:0] co;  // Flat output index base for current PE batch
 
     // Per-lane accumulators and datapath signals
-    reg signed [CW-1:0] acc      [0:PE-1];
-    reg signed [CW-1:0] pe_term  [0:PE-1];
-    reg signed [CW-1:0] pe_next  [0:PE-1];
-    reg                 pe_valid [0:PE-1];
-    reg [ROW_W-1:0]     pe_row   [0:PE-1];
-    reg [ROW_W-1:0]     pe_col   [0:PE-1];
+    reg [CW-1:0]    acc      [0:PE-1];
+    reg [CW-1:0]    pe_term  [0:PE-1];
+    reg [CW-1:0]    pe_next  [0:PE-1];
+    reg             pe_valid [0:PE-1];
+    reg [ROW_W-1:0] pe_row   [0:PE-1];
+    reg [ROW_W-1:0] pe_col   [0:PE-1];
 
     integer i, j;
     integer p_comb, p_seq;
@@ -74,7 +68,7 @@ module mac_core #(
             c_rd_data = c_spm[c_rd_row][c_rd_col];
     end
 
-    // Per-lane ternary add/sub datapath
+    // Per-lane multiply-accumulate datapath
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
             flat_idx = {1'b0, co} + p_comb;
@@ -85,15 +79,12 @@ module mac_core #(
             pe_next[p_comb]  = acc[p_comb];
 
             if (pe_valid[p_comb]) begin
-                // N is fixed at 4 for this design: decode row/col from flat index bits.
                 pe_row[p_comb] = flat_idx[OUT_W-1:ROW_W];
                 pe_col[p_comb] = flat_idx[ROW_W-1:0];
 
-                case (b_spm[ck][pe_col[p_comb]])
-                    2'b01: pe_term[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
-                    2'b10: pe_term[p_comb] = -$signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
-                    default: pe_term[p_comb] = {CW{1'b0}};
-                endcase
+                pe_term[p_comb] = {{(CW-2*DW){1'b0}},
+                                   a_spm[pe_row[p_comb]][ck] *
+                                   b_spm[ck][pe_col[p_comb]]};
 
                 pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
@@ -111,7 +102,7 @@ module mac_core #(
             for (i = 0; i < N; i = i + 1)
                 for (j = 0; j < N; j = j + 1) begin
                     a_spm[i][j] <= {DW{1'b0}};
-                    b_spm[i][j] <= 2'b00;
+                    b_spm[i][j] <= {DW{1'b0}};
                     c_spm[i][j] <= {CW{1'b0}};
                 end
 
@@ -123,7 +114,7 @@ module mac_core #(
             // Load scratchpads when idle
             if (load_en && !busy) begin
                 if (load_sel)
-                    b_spm[load_row][load_col] <= load_data[1:0];
+                    b_spm[load_row][load_col] <= load_data;
                 else
                     a_spm[load_row][load_col] <= load_data;
             end
