@@ -44,11 +44,10 @@ module mac_core #(
     localparam OUTS  = N * N;
     localparam OUT_W = $clog2(OUTS);
 
-    localparam [1:0] ST_IDLE    = 2'd0;
-    localparam [1:0] ST_COMPUTE = 2'd1;
-    localparam [1:0] ST_DONE    = 2'd2;
+    localparam ST_IDLE    = 1'd0;
+    localparam ST_COMPUTE = 1'd1;
 
-    reg [1:0] state;
+    reg state;
 
     // Scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
@@ -169,7 +168,7 @@ module mac_core #(
                         if ((co + PE) >= OUTS) begin
                             busy  <= 1'b0;
                             done  <= 1'b1;
-                            state <= ST_DONE;
+                            state <= ST_IDLE;
                         end else begin
                             co <= co + PE;
                         end
@@ -182,10 +181,6 @@ module mac_core #(
                                 acc[p_seq] <= {CW{1'b0}};
                         end
                     end
-                end
-
-                ST_DONE: begin
-                    state <= ST_IDLE;
                 end
 
                 default: state <= ST_IDLE;
