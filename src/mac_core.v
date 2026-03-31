@@ -42,7 +42,6 @@ module mac_core #(
     localparam ROW_W = $clog2(N);
     localparam OUTS  = N * N;
     localparam OUT_W = $clog2(OUTS);
-    localparam PE_IDX_W = $clog2(PE + 1);
 
     localparam ST_IDLE    = 1'd0;
     localparam ST_COMPUTE = 1'd1;
@@ -97,7 +96,7 @@ module mac_core #(
                 ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]})
                 :  $signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]});
 
-            assign pe_next[p_comb] = pe_valid[p_comb] ? (acc[p_comb] + pe_term[p_comb]) : acc[p_comb];
+            assign pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
         end
     endgenerate
 
@@ -133,7 +132,7 @@ module mac_core #(
 
     // Datapath/scratchpad FFs: no reset, values are initialized before use.
     always @(posedge clk) begin : datapath_seq_blk
-        reg [PE_IDX_W-1:0] p_seq;
+        integer p_seq;
         // Load scratchpads when idle
         if (load_en && !busy) begin
             if (load_sel)
