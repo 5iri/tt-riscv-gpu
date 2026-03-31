@@ -34,10 +34,9 @@ module mac_core #(
     input  wire [DW-1:0]          load_data,
 
     // Result read interface
-    input  wire                   c_rd_en,
     input  wire [$clog2(N)-1:0]   c_rd_row,
     input  wire [$clog2(N)-1:0]   c_rd_col,
-    output reg  [CW-1:0]          c_rd_data
+    output wire [CW-1:0]          c_rd_data
 );
 
     localparam ROW_W = $clog2(N);
@@ -68,11 +67,7 @@ module mac_core #(
     reg [ROW_W-1:0]     pe_col   [0:PE-1];
 
     // Combinational read
-    always @(*) begin
-        c_rd_data = {CW{1'b0}};
-        if (c_rd_en)
-            c_rd_data = c_spm[c_rd_row][c_rd_col];
-    end
+    assign c_rd_data = c_spm[c_rd_row][c_rd_col];
 
     // Per-lane 3-bit weight datapath: scale at narrow width, then extend and negate
     // a_scaled is DW+2 bits wide: max A*3 = 255*3 = 765 < 2^10

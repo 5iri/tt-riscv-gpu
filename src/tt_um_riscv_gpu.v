@@ -153,7 +153,6 @@ module tt_um_riscv_gpu (
         .load_row  (core_load_row),
         .load_col  (core_load_col),
         .load_data (core_load_data),
-        .c_rd_en   (1'b1),
         .c_rd_row  (cmd_row),
         .c_rd_col  (cmd_col),
         .c_rd_data (core_c_data)
