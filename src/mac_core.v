@@ -1,19 +1,23 @@
 `timescale 1ns/1ps
 
-// BitNet b1.58-style matrix multiply core: 4x4 uint8 activations (A) x ternary weights (B).
-// B encoding (W1.58A8):
-//   2'b00 =>  0
-//   2'b01 => +1
-//   2'b10 => -1
-//   2'b11 =>  0 (reserved -> treated as zero)
+// 3-bit sign-magnitude weight matrix multiply core: 4x4 uint8 activations (A) x W3A8 weights (B).
+// B encoding (sign-magnitude, bit[2]=sign, bits[1:0]=magnitude):
+//   3'b000 =>  0
+//   3'b001 => +1
+//   3'b010 => +2
+//   3'b011 => +3
+//   3'b100 =>  0 (reserved)
+//   3'b101 => -1
+//   3'b110 => -2
+//   3'b111 => -3
 //
-// Datapath removes multiplication and uses add/sub/skip only.
+// Datapath uses shift-add (x2=shift, x3=shift+add) and negate — no multiplier.
 // Multiple output lanes (PE) run in parallel to improve throughput.
 
 module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 12,
+    parameter CW = 13,
     parameter PE = 2
 ) (
     input  wire                   clk,
@@ -48,7 +52,7 @@ module mac_core #(
 
     // Scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
-    reg [1:0]    b_spm [0:N-1][0:N-1];
+    reg [2:0]    b_spm [0:N-1][0:N-1];
     reg [CW-1:0] c_spm [0:N-1][0:N-1];
 
     // Loop counters
@@ -74,13 +78,16 @@ module mac_core #(
             c_rd_data = c_spm[c_rd_row][c_rd_col];
     end
 
-    // Per-lane ternary add/sub datapath (no multiplier)
+    // Per-lane 3-bit weight datapath: shift-add for magnitude, negate for sign (no multiplier)
+    reg signed [CW-1:0] pe_scaled [0:PE-1];
+
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
             flat_idx = {1'b0, co} + p_comb;
             pe_valid[p_comb] = (flat_idx < OUTS);
             pe_row[p_comb]   = {ROW_W{1'b0}};
             pe_col[p_comb]   = {ROW_W{1'b0}};
+            pe_scaled[p_comb] = {CW{1'b0}};
             pe_term[p_comb]  = {CW{1'b0}};
             pe_next[p_comb]  = acc[p_comb];
 
@@ -88,11 +95,17 @@ module mac_core #(
                 pe_row[p_comb] = flat_idx[OUT_W-1:ROW_W];
                 pe_col[p_comb] = flat_idx[ROW_W-1:0];
 
-                case (b_spm[ck][pe_col[p_comb]])
-                    2'b01: pe_term[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
-                    2'b10: pe_term[p_comb] = -$signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
-                    default: pe_term[p_comb] = {CW{1'b0}};
+                // Scale by magnitude (bits[1:0]) using shifts and add
+                case (b_spm[ck][pe_col[p_comb]][1:0])
+                    2'b01: pe_scaled[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    2'b10: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0});
+                    2'b11: pe_scaled[p_comb] = $signed({{(CW-DW-1){1'b0}}, a_spm[pe_row[p_comb]][ck], 1'b0})
+                                             + $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    default: pe_scaled[p_comb] = {CW{1'b0}};
                 endcase
+
+                // Apply sign (bit[2])
+                pe_term[p_comb] = b_spm[ck][pe_col[p_comb]][2] ? -pe_scaled[p_comb] : pe_scaled[p_comb];
 
                 pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
@@ -110,7 +123,7 @@ module mac_core #(
             for (i = 0; i < N; i = i + 1)
                 for (j = 0; j < N; j = j + 1) begin
                     a_spm[i][j] <= {DW{1'b0}};
-                    b_spm[i][j] <= 2'b00;
+                    b_spm[i][j] <= 3'b000;
                     c_spm[i][j] <= {CW{1'b0}};
                 end
 
@@ -122,7 +135,7 @@ module mac_core #(
             // Load scratchpads when idle
             if (load_en && !busy) begin
                 if (load_sel)
-                    b_spm[load_row][load_col] <= load_data[1:0];
+                    b_spm[load_row][load_col] <= load_data[2:0];
                 else
                     a_spm[load_row][load_col] <= load_data;
             end
