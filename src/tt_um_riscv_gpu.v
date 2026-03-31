@@ -95,7 +95,6 @@ module tt_um_riscv_gpu (
     end
 
     // --- Write handling ---
-    // core_load_en/core_start: cleared every cycle, no reset needed.
     // core_load_sel/row/col/data: only sampled when core_load_en=1, no reset needed.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
