@@ -120,21 +120,11 @@ module mac_core #(
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
+            // Only reset control outputs — scratchpads/counters/accumulators
+            // are initialized before use and don't need reset connections.
             state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
-            ck    <= {ROW_W{1'b0}};
-            co    <= {OUT_W{1'b0}};
-
-            for (i = 0; i < N; i = i + 1)
-                for (j = 0; j < N; j = j + 1) begin
-                    a_spm[i][j] <= {DW{1'b0}};
-                    b_spm[i][j] <= 3'b000;
-                    c_spm[i][j] <= {CW{1'b0}};
-                end
-
-            for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
-                acc[p_seq] <= {CW{1'b0}};
         end else begin
             done <= 1'b0;
 
