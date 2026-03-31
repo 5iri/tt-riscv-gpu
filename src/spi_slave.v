@@ -62,11 +62,7 @@ module spi_slave (
     always @(posedge clk) begin
         if (rst) begin
             bit_cnt   <= 6'd0;
-            shift_in  <= 8'd0;
-            shift_out <= 24'd0;
-            cmd_byte  <= 8'd0;
             cmd_valid <= 1'b0;
-            wr_byte   <= 8'd0;
             wr_valid  <= 1'b0;
             cmd_phase <= 1'b1;
             rd_loaded <= 1'b0;

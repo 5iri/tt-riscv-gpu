@@ -43,6 +43,7 @@ module mac_core #(
     localparam ROW_W = $clog2(N);
     localparam OUTS  = N * N;
     localparam OUT_W = $clog2(OUTS);
+    localparam PE_IDX_W = $clog2(PE + 1);
 
     localparam ST_IDLE    = 1'd0;
     localparam ST_COMPUTE = 1'd1;
@@ -66,11 +67,6 @@ module mac_core #(
     reg [ROW_W-1:0]     pe_row   [0:PE-1];
     reg [ROW_W-1:0]     pe_col   [0:PE-1];
 
-
-    integer i, j;
-    integer p_comb, p_seq;
-    reg [OUT_W:0] flat_idx;
-
     // Combinational read
     always @(*) begin
         c_rd_data = {CW{1'b0}};
@@ -83,7 +79,9 @@ module mac_core #(
     reg [DW+1:0] a_scaled [0:PE-1];
     reg [2:0]    b_val    [0:PE-1];
 
-    always @(*) begin
+    always @(*) begin : pe_comb_blk
+        reg [PE_IDX_W-1:0] p_comb;
+        reg [OUT_W:0] flat_idx;
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
             flat_idx = {1'b0, co} + p_comb[0];
             pe_valid[p_comb]  = (flat_idx < OUTS);
@@ -118,68 +116,82 @@ module mac_core #(
         end
     end
 
+    // Control-only async reset: keep reset fanout off datapath/scratchpad FFs.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            // Only reset control outputs — scratchpads/counters/accumulators
-            // are initialized before use and don't need reset connections.
             state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
         end else begin
             done <= 1'b0;
 
-            // Load scratchpads when idle
-            if (load_en && !busy) begin
-                if (load_sel)
-                    b_spm[load_row][load_col] <= load_data[2:0];
-                else
-                    a_spm[load_row][load_col] <= load_data;
-            end
-
             case (state)
                 ST_IDLE: begin
                     if (start) begin
-                        busy <= 1'b1;
-                        ck   <= {ROW_W{1'b0}};
-                        co   <= {OUT_W{1'b0}};
-                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
-                            acc[p_seq] <= {CW{1'b0}};
+                        busy  <= 1'b1;
                         state <= ST_COMPUTE;
                     end
                 end
 
                 ST_COMPUTE: begin
-                    if (ck == N[ROW_W-1:0] - 1'b1) begin
-                        // Dot-product end for all active lanes: store and reset lane accumulators.
-                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
-                            if (pe_valid[p_seq])
-                                c_spm[pe_row[p_seq]][pe_col[p_seq]] <= pe_next[p_seq];
-                            acc[p_seq] <= {CW{1'b0}};
-                        end
-
-                        ck <= {ROW_W{1'b0}};
-
-                        if ((co + PE) >= OUTS) begin
-                            busy  <= 1'b0;
-                            done  <= 1'b1;
-                            state <= ST_IDLE;
-                        end else begin
-                            co <= co + PE;
-                        end
-                    end else begin
-                        ck <= ck + 1'b1;
-                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
-                            if (pe_valid[p_seq])
-                                acc[p_seq] <= pe_next[p_seq];
-                            else
-                                acc[p_seq] <= {CW{1'b0}};
-                        end
+                    if ((ck == N[ROW_W-1:0] - 1'b1) && ((co + PE) >= OUTS)) begin
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
+                        state <= ST_IDLE;
                     end
                 end
 
                 default: state <= ST_IDLE;
             endcase
         end
+    end
+
+    // Datapath/scratchpad FFs: no reset, values are initialized before use.
+    always @(posedge clk) begin : datapath_seq_blk
+        reg [PE_IDX_W-1:0] p_seq;
+        // Load scratchpads when idle
+        if (load_en && !busy) begin
+            if (load_sel)
+                b_spm[load_row][load_col] <= load_data[2:0];
+            else
+                a_spm[load_row][load_col] <= load_data;
+        end
+
+        case (state)
+            ST_IDLE: begin
+                if (start) begin
+                    ck <= {ROW_W{1'b0}};
+                    co <= {OUT_W{1'b0}};
+                    for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
+                        acc[p_seq] <= {CW{1'b0}};
+                end
+            end
+
+            ST_COMPUTE: begin
+                if (ck == N[ROW_W-1:0] - 1'b1) begin
+                    // Dot-product end for all active lanes: store and reset lane accumulators.
+                    for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                        if (pe_valid[p_seq])
+                            c_spm[pe_row[p_seq]][pe_col[p_seq]] <= pe_next[p_seq];
+                        acc[p_seq] <= {CW{1'b0}};
+                    end
+
+                    ck <= {ROW_W{1'b0}};
+                    if ((co + PE) < OUTS)
+                        co <= co + PE;
+                end else begin
+                    ck <= ck + 1'b1;
+                    for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                        if (pe_valid[p_seq])
+                            acc[p_seq] <= pe_next[p_seq];
+                        else
+                            acc[p_seq] <= {CW{1'b0}};
+                    end
+                end
+            end
+
+            default: ;
+        endcase
     end
 
 endmodule
