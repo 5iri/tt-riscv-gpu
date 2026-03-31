@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// TinyTapeout top wrapper for 4x4 uint8 x ternary-weight accelerator with SPI.
+// TinyTapeout top wrapper for 4x4 uint8 x uint8 matrix multiply accelerator with SPI.
 //
 // Pin map:
 //   ui_in[0]  = SPI SCLK
@@ -17,12 +17,12 @@
 //   uio       = unused (active input)
 //
 // SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
-//   SEL 00 = write matrix A element   (1 data byte)
-//   SEL 01 = write matrix B element   (1 data byte, bits [1:0] used: 00=0,01=+1,10=-1)
+//   SEL 00 = write matrix A element   (1 data byte, uint8)
+//   SEL 01 = write matrix B element   (1 data byte, uint8)
 //   SEL 10 = control / status
 //            write: bit 0 = start      (1 data byte)
 //            read:  {6'b0, done, busy}  (1 byte out)
-//   SEL 11 = read matrix C element    (3 bytes out, MSB first)
+//   SEL 11 = read matrix C element    (3 bytes out, MSB first, 18-bit unsigned)
 
 module tt_um_riscv_gpu (
     input  wire [7:0] ui_in,
@@ -70,7 +70,7 @@ module tt_um_riscv_gpu (
     reg         core_start;
     wire        core_busy;
     wire        core_done;
-    wire [11:0] core_c_data;
+    wire [17:0] core_c_data;
 
     // --- Sticky done flag ---
     reg done_sticky;
@@ -88,7 +88,7 @@ module tt_um_riscv_gpu (
     always @(*) begin
         case (cmd_sel)
             2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
-            2'b11:   rd_data = {{12{core_c_data[11]}}, core_c_data};
+            2'b11:   rd_data = {6'b0, core_c_data};
             default: rd_data = 24'b0;
         endcase
     end
@@ -149,11 +149,11 @@ module tt_um_riscv_gpu (
 
     localparam CORE_PE = 2;
 
-    // --- MAC core (ternary-weight, PE-parallel) ---
+    // --- MAC core (uint8 x uint8, PE-parallel) ---
     mac_core #(
         .N  (4),
         .DW (8),
-        .CW (12),
+        .CW (18),
         .PE (CORE_PE)
     ) u_core (
         .clk       (clk),

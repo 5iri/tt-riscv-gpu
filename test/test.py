@@ -6,27 +6,11 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 # SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
-# SEL: 00=A, 01=B(2-bit ternary), 10=ctrl/status, 11=C
+# SEL: 00=A (uint8), 01=B (uint8), 10=ctrl/status, 11=C (18-bit unsigned)
 
 def make_cmd(rw, sel, row, col):
     return ((rw & 1) << 7) | ((sel & 3) << 5) | ((row & 3) << 3) | ((col & 3) << 1)
 
-
-def encode_ternary_weight(value):
-    """Encode ternary weight {-1, 0, +1} into 2-bit code."""
-    if value == 0:
-        return 0x00  # 00
-    if value == 1:
-        return 0x01  # 01
-    if value == -1:
-        return 0x02  # 10
-    raise ValueError(f"Unsupported ternary value {value}, expected -1/0/1")
-
-
-def to_signed(value, width):
-    """Interpret unsigned integer as signed two's-complement with 'width' bits."""
-    sign_bit = 1 << (width - 1)
-    return (value ^ sign_bit) - sign_bit
 
 # Pin indices within ui_in
 SCLK_BIT = 0
@@ -120,21 +104,18 @@ async def _spi_read_byte(dut):
 
 
 async def spi_write_matrix(dut, sel, matrix):
-    """Write a 4x4 matrix (sel=0 for uint8 A, sel=1 for ternary B)."""
+    """Write a 4x4 matrix (sel=0 for uint8 A, sel=1 for uint8 B)."""
     for r in range(4):
         for c in range(4):
             cmd = make_cmd(0, sel, r, c)
-            value = matrix[r][c]
-            if sel == 1:
-                value = encode_ternary_weight(value)
-            await spi_transfer(dut, cmd, write_bytes=[value & 0xFF])
+            await spi_transfer(dut, cmd, write_bytes=[matrix[r][c] & 0xFF])
 
 
 async def spi_read_c(dut, row, col):
-    """Read a 20-bit C element payload from 3 SPI bytes."""
+    """Read an 18-bit unsigned C element from 3 SPI bytes."""
     cmd = make_cmd(1, 3, row, col)
     result = await spi_transfer(dut, cmd, read_count=3)
-    return ((result[0] << 16) | (result[1] << 8) | result[2]) & ((1 << 20) - 1)
+    return ((result[0] << 16) | (result[1] << 8) | result[2]) & ((1 << 18) - 1)
 
 
 async def spi_start(dut):
@@ -151,7 +132,7 @@ async def spi_read_status(dut):
 
 
 def matmul_4x4(a, b):
-    """Reference 4x4 matrix multiply (supports signed ternary B)."""
+    """Reference 4x4 matrix multiply (unsigned uint8)."""
     c = [[0]*4 for _ in range(4)]
     for i in range(4):
         for j in range(4):
@@ -177,13 +158,11 @@ async def test_identity(dut):
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
 
-    # A = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]
-    A = [[1, 2, 3, 4],
-         [5, 6, 7, 8],
-         [9, 10, 11, 12],
+    A = [[1,  2,  3,  4],
+         [5,  6,  7,  8],
+         [9,  10, 11, 12],
          [13, 14, 15, 16]]
 
-    # B = ternary identity
     B = [[1, 0, 0, 0],
          [0, 1, 0, 0],
          [0, 0, 1, 0],
@@ -210,8 +189,7 @@ async def test_identity(dut):
     dut._log.info("Reading results")
     for i in range(4):
         for j in range(4):
-            raw = await spi_read_c(dut, i, j)
-            val = to_signed(raw, 20)
+            val = await spi_read_c(dut, i, j)
             dut._log.info(f"C[{i}][{j}] = {val} (expected {expected[i][j]})")
             assert val == expected[i][j], f"C[{i}][{j}]: got {val}, expected {expected[i][j]}"
 
@@ -220,7 +198,7 @@ async def test_identity(dut):
 
 @cocotb.test()
 async def test_matmul(dut):
-    """General matrix multiply."""
+    """General matrix multiply with uint8 values."""
     dut._log.info("Start matmul test")
 
     clock = Clock(dut.clk, 20, unit="ns")
@@ -235,15 +213,15 @@ async def test_matmul(dut):
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
 
-    A = [[2, 3, 1, 4],
-         [5, 1, 0, 2],
-         [3, 7, 2, 1],
-         [0, 6, 4, 3]]
+    A = [[2,  3,  1,  4],
+         [5,  1,  0,  2],
+         [3,  7,  2,  1],
+         [0,  6,  4,  3]]
 
-    B = [[1,  0, -1,  1],
-         [0,  1,  1, -1],
-         [-1, 1,  0,  1],
-         [1, -1,  1,  0]]
+    B = [[3,  1,  2,  5],
+         [0,  4,  1,  2],
+         [2,  1,  3,  1],
+         [1,  2,  1,  0]]
 
     expected = matmul_4x4(A, B)
 
@@ -261,8 +239,7 @@ async def test_matmul(dut):
 
     for i in range(4):
         for j in range(4):
-            raw = await spi_read_c(dut, i, j)
-            val = to_signed(raw, 20)
+            val = await spi_read_c(dut, i, j)
             assert val == expected[i][j], f"C[{i}][{j}]: got {val}, expected {expected[i][j]}"
 
     dut._log.info("Matmul test PASSED")
