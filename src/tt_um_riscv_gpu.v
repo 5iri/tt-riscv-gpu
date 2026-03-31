@@ -61,6 +61,9 @@ module tt_um_riscv_gpu (
     wire [1:0] cmd_sel     = cmd_byte[6:5];
     wire [1:0] cmd_row     = cmd_byte[4:3];
     wire [1:0] cmd_col     = cmd_byte[2:1];
+    wire       wr_is_mat_a = wr_valid && (cmd_sel == 2'b00);
+    wire       wr_is_mat_b = wr_valid && (cmd_sel == 2'b01);
+    wire       wr_is_start = wr_valid && (cmd_sel == 2'b10) && wr_byte[0];
 
     // --- TPU core signals ---
     reg         core_load_en;
@@ -95,38 +98,24 @@ module tt_um_riscv_gpu (
     end
 
     // --- Write handling ---
-    // core_load_sel/row/col/data: only sampled when core_load_en=1, no reset needed.
+    // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
+    // Keep only one-cycle pulse controls reset-sensitive.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             core_load_en <= 1'b0;
             core_start   <= 1'b0;
         end else begin
-            core_load_en <= 1'b0;
-            core_start   <= 1'b0;
+            core_load_en <= wr_is_mat_a || wr_is_mat_b;
+            core_start   <= wr_is_start;
+        end
+    end
 
-            if (wr_valid) begin
-                case (cmd_sel)
-                    2'b00: begin   // Matrix A
-                        core_load_en   <= 1'b1;
-                        core_load_sel  <= 1'b0;
-                        core_load_row  <= cmd_row;
-                        core_load_col  <= cmd_col;
-                        core_load_data <= wr_byte;
-                    end
-                    2'b01: begin   // Matrix B (ternary)
-                        core_load_en   <= 1'b1;
-                        core_load_sel  <= 1'b1;
-                        core_load_row  <= cmd_row;
-                        core_load_col  <= cmd_col;
-                        core_load_data <= wr_byte;
-                    end
-                    2'b10: begin   // Control: start
-                        if (wr_byte[0])
-                            core_start <= 1'b1;
-                    end
-                    default: ;
-                endcase
-            end
+    always @(posedge clk) begin
+        if (wr_is_mat_a || wr_is_mat_b) begin
+            core_load_sel  <= wr_is_mat_b;
+            core_load_row  <= cmd_row;
+            core_load_col  <= cmd_col;
+            core_load_data <= wr_byte;
         end
     end
 
