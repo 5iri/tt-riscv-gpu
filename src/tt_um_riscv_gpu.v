@@ -134,7 +134,7 @@ module tt_um_riscv_gpu (
         .rd_data   (rd_data)
     );
 
-    localparam CORE_PE = 2;
+    localparam CORE_PE = 1;
 
     // --- MAC core (W3A8, PE-parallel) ---
     mac_core #(
