@@ -79,7 +79,7 @@ module tt_um_riscv_gpu (
     // --- Sticky done flag ---
     reg done_sticky;
 
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst)
             done_sticky <= 1'b0;
         else if (core_start)
@@ -96,7 +96,7 @@ module tt_um_riscv_gpu (
     // --- Write handling ---
     // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
     // Keep only one-cycle pulse controls reset-sensitive.
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             core_load_en <= 1'b0;
             core_start   <= 1'b0;

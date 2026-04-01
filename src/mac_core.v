@@ -100,8 +100,8 @@ module mac_core #(
         end
     endgenerate
 
-    // Control-only async reset: keep reset fanout off datapath/scratchpad FFs.
-    always @(posedge clk or posedge rst) begin
+    // Control-only synchronous reset: avoid async deassert X-propagation in GL.
+    always @(posedge clk) begin
         if (rst) begin
             state <= ST_IDLE;
             busy  <= 1'b0;
