@@ -39,7 +39,7 @@ async def spi_transfer(dut, cmd_byte, write_bytes=None, read_count=0):
     read_result = []
 
     # Assert CS_N low
-    ui = dut.ui_in.value.integer
+    ui = dut.ui_in.value.to_unsigned()
     ui &= ~(1 << CS_N_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 4)
@@ -59,7 +59,7 @@ async def spi_transfer(dut, cmd_byte, write_bytes=None, read_count=0):
 
     # Deassert CS_N high
     await ClockCycles(dut.clk, 2)
-    ui = dut.ui_in.value.integer
+    ui = dut.ui_in.value.to_unsigned()
     ui |= (1 << CS_N_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 4)
@@ -71,7 +71,7 @@ async def _spi_send_byte(dut, byte_val):
     """Clock out 8 bits on MOSI, MSB first."""
     for i in range(7, -1, -1):
         bit = (byte_val >> i) & 1
-        ui = dut.ui_in.value.integer
+        ui = dut.ui_in.value.to_unsigned()
         # Set MOSI
         if bit:
             ui |= (1 << MOSI_BIT)
@@ -87,17 +87,30 @@ async def _spi_send_byte(dut, byte_val):
         await ClockCycles(dut.clk, 4)
 
     # SCLK low after byte
-    ui = dut.ui_in.value.integer
+    ui = dut.ui_in.value.to_unsigned()
     ui &= ~(1 << SCLK_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 2)
+
+
+async def _sample_miso_bit(dut):
+    """Sample MISO bit only; tolerate brief gate-level X/Z transients."""
+    for _ in range(3):
+        bit = str(dut.uo_out.value[0])
+        if bit == "0":
+            return 0
+        if bit == "1":
+            return 1
+        await ClockCycles(dut.clk, 1)
+
+    raise AssertionError(f"MISO unresolved after retries: uo_out={dut.uo_out.value.binstr}")
 
 
 async def _spi_read_byte(dut):
     """Clock in 8 bits from MISO, MSB first."""
     byte_val = 0
     for i in range(7, -1, -1):
-        ui = dut.ui_in.value.integer
+        ui = dut.ui_in.value.to_unsigned()
         # SCLK low (falling edge — slave drives MISO)
         ui &= ~(1 << SCLK_BIT)
         dut.ui_in.value = ui
@@ -107,11 +120,11 @@ async def _spi_read_byte(dut):
         dut.ui_in.value = ui
         await ClockCycles(dut.clk, 4)
         # Sample MISO (uo_out[0])
-        miso = (dut.uo_out.value.integer >> 0) & 1
+        miso = await _sample_miso_bit(dut)
         byte_val = (byte_val << 1) | miso
 
     # SCLK low after byte
-    ui = dut.ui_in.value.integer
+    ui = dut.ui_in.value.to_unsigned()
     ui &= ~(1 << SCLK_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 2)
