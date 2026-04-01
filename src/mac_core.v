@@ -107,7 +107,9 @@ module mac_core #(
             busy  <= 1'b0;
             done  <= 1'b0;
         end else begin
+            // Deterministic defaults each cycle to avoid X-retention in GL.
             done <= 1'b0;
+            busy <= 1'b0;
 
             case (state)
                 ST_IDLE: begin
@@ -118,6 +120,7 @@ module mac_core #(
                 end
 
                 ST_COMPUTE: begin
+                    busy <= 1'b1;
                     if ((ck == N[ROW_W-1:0] - 1'b1) && ((co + PE) >= OUTS)) begin
                         busy  <= 1'b0;
                         done  <= 1'b1;
@@ -125,7 +128,10 @@ module mac_core #(
                     end
                 end
 
-                default: state <= ST_IDLE;
+                default: begin
+                    busy  <= 1'b0;
+                    state <= ST_IDLE;
+                end
             endcase
         end
     end
