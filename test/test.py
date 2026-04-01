@@ -179,6 +179,9 @@ async def test_identity(dut):
     """Multiply by identity matrix."""
     dut._log.info("Start identity test")
 
+    # Ensure deterministic clock startup for gate-level runs.
+    dut.clk.value = 0
+    dut.rst_n.value = 0
     clock = Clock(dut.clk, 20, unit="ns")  # 50 MHz
     cocotb.start_soon(clock.start())
 
@@ -186,7 +189,6 @@ async def test_identity(dut):
     dut.ena.value = 1
     dut.ui_in.value = (1 << CS_N_BIT)  # CS_N high, others low
     dut.uio_in.value = 0
-    dut.rst_n.value = 0
     await ClockCycles(dut.clk, 20)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
@@ -235,6 +237,9 @@ async def test_matmul(dut):
     """General matrix multiply with 3-bit weights {-3..+3}."""
     dut._log.info("Start matmul test")
 
+    # Ensure deterministic clock startup for gate-level runs.
+    dut.clk.value = 0
+    dut.rst_n.value = 0
     clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
 
@@ -242,7 +247,6 @@ async def test_matmul(dut):
     dut.ena.value = 1
     dut.ui_in.value = (1 << CS_N_BIT)
     dut.uio_in.value = 0
-    dut.rst_n.value = 0
     await ClockCycles(dut.clk, 20)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
