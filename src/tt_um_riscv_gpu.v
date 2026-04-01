@@ -72,24 +72,33 @@ module tt_um_riscv_gpu (
     reg  [1:0]  core_load_col;
     reg  [7:0]  core_load_data;
     reg         core_start;
-    wire        core_busy;
     wire        core_done;
     wire [12:0] core_c_data;
 
-    // --- Sticky done flag ---
-    reg done_sticky;
+    // --- Public status flags (SPI + pins): keep deterministic in GL ---
+    reg status_busy;
+    reg status_done;
 
     always @(posedge clk) begin
         if (rst)
-            done_sticky <= 1'b0;
+            status_busy <= 1'b0;
         else if (core_start)
-            done_sticky <= 1'b0;
-        else if (core_done)
-            done_sticky <= 1'b1;
+            status_busy <= 1'b1;
+        else if (status_busy && core_done)
+            status_busy <= 1'b0;
+    end
+
+    always @(posedge clk) begin
+        if (rst)
+            status_done <= 1'b0;
+        else if (core_start)
+            status_done <= 1'b0;
+        else if (status_busy && core_done)
+            status_done <= 1'b1;
     end
 
     // --- Read data mux (combinational, feeds SPI shift-out) ---
-    assign rd_data = (cmd_sel == 2'b10) ? {6'b0, done_sticky, core_busy, 16'b0} :
+    assign rd_data = (cmd_sel == 2'b10) ? {6'b0, status_done, status_busy, 16'b0} :
                      (cmd_sel == 2'b11) ? {{11{core_c_data[12]}}, core_c_data} :
                                           24'b0;
 
@@ -142,7 +151,7 @@ module tt_um_riscv_gpu (
         .clk       (clk),
         .rst       (rst),
         .start     (core_start),
-        .busy      (core_busy),
+        .busy      (),
         .done      (core_done),
         .load_en   (core_load_en),
         .load_sel  (core_load_sel),
@@ -156,8 +165,8 @@ module tt_um_riscv_gpu (
 
     // --- Output pin mapping ---
     assign uo_out[0]   = spi_miso;
-    assign uo_out[1]   = core_busy;
-    assign uo_out[2]   = done_sticky;
+    assign uo_out[1]   = status_busy;
+    assign uo_out[2]   = status_done;
     assign uo_out[7:3] = 5'b0;
 
 endmodule
