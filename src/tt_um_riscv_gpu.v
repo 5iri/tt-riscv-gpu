@@ -54,7 +54,7 @@ module tt_um_riscv_gpu (
     wire [7:0]  cmd_byte;
     wire        wr_valid;
     wire [7:0]  wr_byte;
-    wire [23:0] rd_data;
+    reg  [23:0] rd_data;
 
     // --- Command decode ---
     wire       cmd_is_read = cmd_byte[7];
@@ -72,40 +72,35 @@ module tt_um_riscv_gpu (
     reg  [1:0]  core_load_col;
     reg  [7:0]  core_load_data;
     reg         core_start;
+    wire        core_busy;
     wire        core_done;
     wire [12:0] core_c_data;
 
-    // --- Public status flags (SPI + pins): keep deterministic in GL ---
-    reg status_busy;
-    reg status_done;
+    // --- Sticky done flag ---
+    reg done_sticky;
 
-    always @(posedge clk) begin
+    always @(posedge clk or posedge rst) begin
         if (rst)
-            status_busy <= 1'b0;
+            done_sticky <= 1'b0;
         else if (core_start)
-            status_busy <= 1'b1;
-        else if (status_busy && core_done)
-            status_busy <= 1'b0;
-    end
-
-    always @(posedge clk) begin
-        if (rst)
-            status_done <= 1'b0;
-        else if (core_start)
-            status_done <= 1'b0;
-        else if (status_busy && core_done)
-            status_done <= 1'b1;
+            done_sticky <= 1'b0;
+        else if (core_done)
+            done_sticky <= 1'b1;
     end
 
     // --- Read data mux (combinational, feeds SPI shift-out) ---
-    assign rd_data = (cmd_sel == 2'b10) ? {6'b0, status_done, status_busy, 16'b0} :
-                     (cmd_sel == 2'b11) ? {{11{core_c_data[12]}}, core_c_data} :
-                                          24'b0;
+    always @(*) begin
+        case (cmd_sel)
+            2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
+            2'b11:   rd_data = {{11{core_c_data[12]}}, core_c_data};
+            default: rd_data = 24'b0;
+        endcase
+    end
 
     // --- Write handling ---
     // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
     // Keep only one-cycle pulse controls reset-sensitive.
-    always @(posedge clk) begin
+    always @(posedge clk or posedge rst) begin
         if (rst) begin
             core_load_en <= 1'b0;
             core_start   <= 1'b0;
@@ -151,13 +146,14 @@ module tt_um_riscv_gpu (
         .clk       (clk),
         .rst       (rst),
         .start     (core_start),
-        .busy      (),
+        .busy      (core_busy),
         .done      (core_done),
         .load_en   (core_load_en),
         .load_sel  (core_load_sel),
         .load_row  (core_load_row),
         .load_col  (core_load_col),
         .load_data (core_load_data),
+        .c_rd_en   (1'b1),
         .c_rd_row  (cmd_row),
         .c_rd_col  (cmd_col),
         .c_rd_data (core_c_data)
@@ -165,8 +161,8 @@ module tt_um_riscv_gpu (
 
     // --- Output pin mapping ---
     assign uo_out[0]   = spi_miso;
-    assign uo_out[1]   = status_busy;
-    assign uo_out[2]   = status_done;
+    assign uo_out[1]   = core_busy;
+    assign uo_out[2]   = done_sticky;
     assign uo_out[7:3] = 5'b0;
 
 endmodule
