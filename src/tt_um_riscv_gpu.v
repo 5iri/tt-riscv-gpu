@@ -136,10 +136,8 @@ module tt_um_riscv_gpu (
 
     // --- MAC core (W3A8, outer-product with 8 lanes; N=4 takes 8 compute cycles) ---
     mac_core #(
-        .N  (4),
         .DW (8),
-        .CW (13),
-        .LANES (8)
+        .CW (13)
     ) u_core (
         .clk       (clk),
         .rst       (rst),
