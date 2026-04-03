@@ -134,14 +134,11 @@ module tt_um_riscv_gpu (
         .rd_data   (rd_data)
     );
 
-    localparam CORE_PE = 2;
-
-    // --- MAC core (W3A8, PE-parallel) ---
+    // --- MAC core (W3A8, outer-product: all N² outputs in parallel, N=4 cycles) ---
     mac_core #(
         .N  (4),
         .DW (8),
-        .CW (13),
-        .PE (CORE_PE)
+        .CW (13)
     ) u_core (
         .clk       (clk),
         .rst       (rst),
