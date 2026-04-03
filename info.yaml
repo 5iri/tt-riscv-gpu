@@ -3,7 +3,7 @@ project:
   title:        "4x4 W3A8 Matrix Multiply Accelerator"
   author:       "siriboi"
   discord:      ""
-  description:  "SPI-controlled 4x4 W3A8 matrix multiply accelerator: uint8 activations x 3-bit {-3..+3} weights, multiplier-free outer-product MAC (all 16 outputs in parallel, 4-cycle compute)"
+  description:  "SPI-controlled 4x4 W3A8 matrix multiply accelerator: uint8 activations x 3-bit {-3..+3} weights, multiplier-free outer-product MAC (8 lanes, 8-cycle compute)"
   language:     "Verilog"
   clock_hz:     50000000
 

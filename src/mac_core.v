@@ -3,13 +3,16 @@
 // Outer-product W3A8 matrix multiply core: 4x4 uint8 activations (A) x 3-bit sign-magnitude weights (B).
 // B encoding: bit[2]=sign, bits[1:0]=magnitude {0,1,2,3} → value {0,+1,+2,+3} or negated.
 //
-// All N² output accumulators compute in parallel (outer product per k-step).
-// Computation takes exactly N clock cycles. acc[] doubles as c_spm after done.
+// 8-lane outer-product engine:
+// - Each k-step is processed in groups of LANES outputs.
+// - For N=4 and LANES=8, computation takes N * (16/8) = 8 cycles.
+// acc[] doubles as c_spm after done.
 
 module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 13
+    parameter CW = 13,
+    parameter LANES = 8
 ) (
     input  wire                   clk,
     input  wire                   rst,
@@ -33,6 +36,9 @@ module mac_core #(
 
     localparam ROW_W = $clog2(N);
     localparam OUTS  = N * N;
+    localparam OUT_W = (OUTS <= 1) ? 1 : $clog2(OUTS);
+    localparam GRPS  = (OUTS + LANES - 1) / LANES;
+    localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
 
     localparam ST_IDLE    = 1'd0;
     localparam ST_COMPUTE = 1'd1;
@@ -47,48 +53,69 @@ module mac_core #(
     // acc[row*N + col] holds C[row][col].
     reg signed [CW-1:0] acc [0:OUTS-1];
 
-    // k-step counter (only counter needed)
+    // Compute counters
     reg [ROW_W-1:0] ck;
+    reg [GRP_W-1:0] grp;
 
     // Combinational result read
     always @(*) begin
         c_rd_data = {CW{1'b0}};
         if (c_rd_en)
-            c_rd_data = acc[{c_rd_row, c_rd_col}];
+            c_rd_data = acc[c_rd_row * N + c_rd_col];
     end
 
-    // Outer-product PE array: for each output p, row=p/N, col=p%N.
-    // At each k-step: pe_next[p] = acc[p] + A[row][k] * B[k][col]
-    integer p_comb;
-    reg [DW+1:0]        a_scaled [0:OUTS-1];
-    reg [2:0]           b_val    [0:OUTS-1];
-    reg signed [CW-1:0] pe_next  [0:OUTS-1];
+    // 8-lane outer-product datapath:
+    // for lane l, global output index p = grp*LANES + l.
+    integer l_comb;
+    integer idx_i;
+    integer row_i;
+    integer col_i;
+    reg                 lane_valid [0:LANES-1];
+    reg [OUT_W-1:0]     lane_idx   [0:LANES-1];
+    reg [2:0]           b_val      [0:LANES-1];
+    reg [DW+1:0]        a_scaled   [0:LANES-1];
+    reg signed [CW-1:0] pe_next    [0:LANES-1];
 
     always @(*) begin
-        for (p_comb = 0; p_comb < OUTS; p_comb = p_comb + 1) begin
-            b_val[p_comb] = b_spm[ck][p_comb % N];
+        for (l_comb = 0; l_comb < LANES; l_comb = l_comb + 1) begin
+            idx_i = grp * LANES + l_comb;
 
-            // Shift-add: magnitude 0→0, 1→A, 2→A<<1, 3→(A<<1)+A
-            case (b_val[p_comb][1:0])
-                2'b01: a_scaled[p_comb] = {2'b0,  a_spm[p_comb / N][ck]};
-                2'b10: a_scaled[p_comb] = {1'b0,  a_spm[p_comb / N][ck], 1'b0};
-                2'b11: a_scaled[p_comb] = {1'b0,  a_spm[p_comb / N][ck], 1'b0}
-                                        + {2'b0,  a_spm[p_comb / N][ck]};
-                default: a_scaled[p_comb] = {(DW+2){1'b0}};
-            endcase
+            lane_valid[l_comb] = (idx_i < OUTS);
+            lane_idx[l_comb]   = idx_i[OUT_W-1:0];
+            b_val[l_comb]      = 3'b000;
+            a_scaled[l_comb]   = {(DW+2){1'b0}};
+            pe_next[l_comb]    = {CW{1'b0}};
 
-            pe_next[p_comb] = acc[p_comb] + (b_val[p_comb][2]
-                ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]})
-                :  $signed({{(CW-DW-2){1'b0}}, a_scaled[p_comb]}));
+            if (lane_valid[l_comb]) begin
+                row_i = idx_i / N;
+                col_i = idx_i - (row_i * N);
+                b_val[l_comb] = b_spm[ck][col_i[ROW_W-1:0]];
+
+                // Shift-add: magnitude 0→0, 1→A, 2→A<<1, 3→(A<<1)+A
+                case (b_val[l_comb][1:0])
+                    2'b01: a_scaled[l_comb] = {2'b0,  a_spm[row_i[ROW_W-1:0]][ck]};
+                    2'b10: a_scaled[l_comb] = {1'b0,  a_spm[row_i[ROW_W-1:0]][ck], 1'b0};
+                    2'b11: a_scaled[l_comb] = {1'b0,  a_spm[row_i[ROW_W-1:0]][ck], 1'b0}
+                                            + {2'b0,  a_spm[row_i[ROW_W-1:0]][ck]};
+                    default: a_scaled[l_comb] = {(DW+2){1'b0}};
+                endcase
+
+                pe_next[l_comb] = acc[lane_idx[l_comb]] + (b_val[l_comb][2]
+                    ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]})
+                    :  $signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]}));
+            end
         end
     end
 
     integer p_seq;
+    integer l_seq;
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
+            ck    <= {ROW_W{1'b0}};
+            grp   <= {GRP_W{1'b0}};
         end else begin
             done <= 1'b0;
 
@@ -104,6 +131,7 @@ module mac_core #(
                     if (start) begin
                         busy  <= 1'b1;
                         ck    <= {ROW_W{1'b0}};
+                        grp   <= {GRP_W{1'b0}};
                         for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
                             acc[p_seq] <= {CW{1'b0}};
                         state <= ST_COMPUTE;
@@ -111,15 +139,22 @@ module mac_core #(
                 end
 
                 ST_COMPUTE: begin
-                    for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
-                        acc[p_seq] <= pe_next[p_seq];
+                    for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
+                        if (lane_valid[l_seq])
+                            acc[lane_idx[l_seq]] <= pe_next[l_seq];
+                    end
 
-                    if (ck == N[ROW_W-1:0] - 1'b1) begin
-                        busy  <= 1'b0;
-                        done  <= 1'b1;
-                        state <= ST_IDLE;
+                    if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
+                        grp <= {GRP_W{1'b0}};
+                        if (ck == N[ROW_W-1:0] - 1'b1) begin
+                            busy  <= 1'b0;
+                            done  <= 1'b1;
+                            state <= ST_IDLE;
+                        end else begin
+                            ck <= ck + 1'b1;
+                        end
                     end else begin
-                        ck <= ck + 1'b1;
+                        grp <= grp + 1'b1;
                     end
                 end
 
