@@ -1,101 +1,121 @@
 `timescale 1ns/1ps
 
-// 4x4 W3A8 matrix multiply core with an 8-lane outer-product engine.
-// - A: 4x4 uint8 activations
-// - B: 4x4 sign-magnitude weights (bit2=sign, bits[1:0]=magnitude 0..3)
-// - C: 4x4 signed 13-bit outputs
+// Outer-product W3A8 matrix multiply core: 4x4 uint8 activations (A) x 3-bit sign-magnitude weights (B).
+// B encoding: bit[2]=sign, bits[1:0]=magnitude {0,1,2,3} → value {0,+1,+2,+3} or negated.
 //
-// Scheduling:
-// - Each k-step uses two cycles (grp=0 then grp=1), 8 outputs per cycle.
-// - Total compute latency is 8 cycles after start.
+// 8-lane outer-product engine:
+// - Each k-step is processed in groups of LANES outputs.
+// - For N=4 and LANES=8, computation takes N * (16/8) = 8 cycles.
+// acc[] doubles as c_spm after done.
 
 module mac_core #(
+    parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 13
+    parameter CW = 13,
+    parameter LANES = 8
 ) (
-    input  wire             clk,
-    input  wire             rst,
-    input  wire             start,
-    output reg              busy,
-    output reg              done,
+    input  wire                   clk,
+    input  wire                   rst,
+    input  wire                   start,
+    output reg                    busy,
+    output reg                    done,
 
     // Scratchpad load interface
-    input  wire             load_en,
-    input  wire             load_sel,  // 0: A, 1: B
-    input  wire [1:0]       load_row,
-    input  wire [1:0]       load_col,
-    input  wire [DW-1:0]    load_data,
+    input  wire                   load_en,
+    input  wire                   load_sel,  // 0: A, 1: B
+    input  wire [$clog2(N)-1:0]   load_row,
+    input  wire [$clog2(N)-1:0]   load_col,
+    input  wire [DW-1:0]          load_data,
 
-    // Result read interface
-    input  wire             c_rd_en,
-    input  wire [1:0]       c_rd_row,
-    input  wire [1:0]       c_rd_col,
-    output reg  [CW-1:0]    c_rd_data
+    // Result read interface (valid after done; reads acc[] directly)
+    input  wire                   c_rd_en,
+    input  wire [$clog2(N)-1:0]   c_rd_row,
+    input  wire [$clog2(N)-1:0]   c_rd_col,
+    output reg  [CW-1:0]          c_rd_data
 );
 
-    localparam ST_IDLE    = 1'b0;
-    localparam ST_COMPUTE = 1'b1;
+    localparam ROW_W = $clog2(N);
+    localparam OUTS  = N * N;
+    localparam OUT_W = (OUTS <= 1) ? 1 : $clog2(OUTS);
+    localparam GRPS  = (OUTS + LANES - 1) / LANES;
+    localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
+
+    localparam ST_IDLE    = 1'd0;
+    localparam ST_COMPUTE = 1'd1;
 
     reg state;
 
-    reg [DW-1:0] a_spm [0:3][0:3];
-    reg [2:0]    b_spm [0:3][0:3];
-    reg signed [CW-1:0] acc [0:15];
+    // Input scratchpads
+    reg [DW-1:0] a_spm [0:N-1][0:N-1];
+    reg [2:0]    b_spm [0:N-1][0:N-1];
 
-    reg [1:0] ck;
-    reg       grp;
+    // Output accumulators — also serve as c_spm after done.
+    // acc[row*N + col] holds C[row][col].
+    reg signed [CW-1:0] acc [0:OUTS-1];
 
-    function automatic signed [CW-1:0] w3_mul;
-        input [DW-1:0] a;
-        input [2:0]    b;
-        reg [DW+1:0] scaled;
-        begin
-            case (b[1:0])
-                2'b01:   scaled = {2'b00, a};
-                2'b10:   scaled = {1'b0, a, 1'b0};
-                2'b11:   scaled = {1'b0, a, 1'b0} + {2'b00, a};
-                default: scaled = {(DW+2){1'b0}};
-            endcase
+    // Compute counters
+    reg [ROW_W-1:0] ck;
+    reg [GRP_W-1:0] grp;
 
-            if (b[2])
-                w3_mul = -$signed({{(CW-DW-2){1'b0}}, scaled});
-            else
-                w3_mul =  $signed({{(CW-DW-2){1'b0}}, scaled});
-        end
-    endfunction
-
+    // Combinational result read
     always @(*) begin
         c_rd_data = {CW{1'b0}};
-        if (c_rd_en) begin
-            case ({c_rd_row, c_rd_col})
-                4'h0: c_rd_data = acc[0];
-                4'h1: c_rd_data = acc[1];
-                4'h2: c_rd_data = acc[2];
-                4'h3: c_rd_data = acc[3];
-                4'h4: c_rd_data = acc[4];
-                4'h5: c_rd_data = acc[5];
-                4'h6: c_rd_data = acc[6];
-                4'h7: c_rd_data = acc[7];
-                4'h8: c_rd_data = acc[8];
-                4'h9: c_rd_data = acc[9];
-                4'hA: c_rd_data = acc[10];
-                4'hB: c_rd_data = acc[11];
-                4'hC: c_rd_data = acc[12];
-                4'hD: c_rd_data = acc[13];
-                4'hE: c_rd_data = acc[14];
-                4'hF: c_rd_data = acc[15];
-            endcase
+        if (c_rd_en)
+            c_rd_data = acc[c_rd_row * N + c_rd_col];
+    end
+
+    // 8-lane outer-product datapath:
+    // for lane l, global output index p = grp*LANES + l.
+    integer l_comb;
+    integer idx_i;
+    integer row_i;
+    integer col_i;
+    reg                 lane_valid [0:LANES-1];
+    reg [OUT_W-1:0]     lane_idx   [0:LANES-1];
+    reg [2:0]           b_val      [0:LANES-1];
+    reg [DW+1:0]        a_scaled   [0:LANES-1];
+    reg signed [CW-1:0] pe_next    [0:LANES-1];
+
+    always @(*) begin
+        for (l_comb = 0; l_comb < LANES; l_comb = l_comb + 1) begin
+            idx_i = grp * LANES + l_comb;
+
+            lane_valid[l_comb] = (idx_i < OUTS);
+            lane_idx[l_comb]   = idx_i[OUT_W-1:0];
+            b_val[l_comb]      = 3'b000;
+            a_scaled[l_comb]   = {(DW+2){1'b0}};
+            pe_next[l_comb]    = {CW{1'b0}};
+
+            if (lane_valid[l_comb]) begin
+                row_i = idx_i / N;
+                col_i = idx_i - (row_i * N);
+                b_val[l_comb] = b_spm[ck][col_i[ROW_W-1:0]];
+
+                // Shift-add: magnitude 0→0, 1→A, 2→A<<1, 3→(A<<1)+A
+                case (b_val[l_comb][1:0])
+                    2'b01: a_scaled[l_comb] = {2'b0,  a_spm[row_i[ROW_W-1:0]][ck]};
+                    2'b10: a_scaled[l_comb] = {1'b0,  a_spm[row_i[ROW_W-1:0]][ck], 1'b0};
+                    2'b11: a_scaled[l_comb] = {1'b0,  a_spm[row_i[ROW_W-1:0]][ck], 1'b0}
+                                            + {2'b0,  a_spm[row_i[ROW_W-1:0]][ck]};
+                    default: a_scaled[l_comb] = {(DW+2){1'b0}};
+                endcase
+
+                pe_next[l_comb] = acc[lane_idx[l_comb]] + (b_val[l_comb][2]
+                    ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]})
+                    :  $signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]}));
+            end
         end
     end
 
-    integer i;
+    integer p_seq;
+    integer l_seq;
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
-            ck    <= 2'b00;
-            grp   <= 1'b0;
+            ck    <= {ROW_W{1'b0}};
+            grp   <= {GRP_W{1'b0}};
         end else begin
             done <= 1'b0;
 
@@ -109,46 +129,32 @@ module mac_core #(
             case (state)
                 ST_IDLE: begin
                     if (start) begin
-                        busy <= 1'b1;
-                        ck   <= 2'b00;
-                        grp  <= 1'b0;
-                        for (i = 0; i < 16; i = i + 1)
-                            acc[i] <= {CW{1'b0}};
+                        busy  <= 1'b1;
+                        ck    <= {ROW_W{1'b0}};
+                        grp   <= {GRP_W{1'b0}};
+                        for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
+                            acc[p_seq] <= {CW{1'b0}};
                         state <= ST_COMPUTE;
                     end
                 end
 
                 ST_COMPUTE: begin
-                    if (!grp) begin
-                        // grp=0: rows 0 and 1 (8 outputs)
-                        acc[0] <= acc[0] + w3_mul(a_spm[0][ck], b_spm[ck][0]);
-                        acc[1] <= acc[1] + w3_mul(a_spm[0][ck], b_spm[ck][1]);
-                        acc[2] <= acc[2] + w3_mul(a_spm[0][ck], b_spm[ck][2]);
-                        acc[3] <= acc[3] + w3_mul(a_spm[0][ck], b_spm[ck][3]);
-                        acc[4] <= acc[4] + w3_mul(a_spm[1][ck], b_spm[ck][0]);
-                        acc[5] <= acc[5] + w3_mul(a_spm[1][ck], b_spm[ck][1]);
-                        acc[6] <= acc[6] + w3_mul(a_spm[1][ck], b_spm[ck][2]);
-                        acc[7] <= acc[7] + w3_mul(a_spm[1][ck], b_spm[ck][3]);
-                        grp    <= 1'b1;
-                    end else begin
-                        // grp=1: rows 2 and 3 (8 outputs)
-                        acc[8]  <= acc[8]  + w3_mul(a_spm[2][ck], b_spm[ck][0]);
-                        acc[9]  <= acc[9]  + w3_mul(a_spm[2][ck], b_spm[ck][1]);
-                        acc[10] <= acc[10] + w3_mul(a_spm[2][ck], b_spm[ck][2]);
-                        acc[11] <= acc[11] + w3_mul(a_spm[2][ck], b_spm[ck][3]);
-                        acc[12] <= acc[12] + w3_mul(a_spm[3][ck], b_spm[ck][0]);
-                        acc[13] <= acc[13] + w3_mul(a_spm[3][ck], b_spm[ck][1]);
-                        acc[14] <= acc[14] + w3_mul(a_spm[3][ck], b_spm[ck][2]);
-                        acc[15] <= acc[15] + w3_mul(a_spm[3][ck], b_spm[ck][3]);
+                    for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
+                        if (lane_valid[l_seq])
+                            acc[lane_idx[l_seq]] <= pe_next[l_seq];
+                    end
 
-                        grp <= 1'b0;
-                        if (ck == 2'd3) begin
+                    if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
+                        grp <= {GRP_W{1'b0}};
+                        if (ck == N[ROW_W-1:0] - 1'b1) begin
                             busy  <= 1'b0;
                             done  <= 1'b1;
                             state <= ST_IDLE;
                         end else begin
-                            ck <= ck + 2'd1;
+                            ck <= ck + 1'b1;
                         end
+                    end else begin
+                        grp <= grp + 1'b1;
                     end
                 end
 
