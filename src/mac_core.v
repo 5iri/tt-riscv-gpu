@@ -21,8 +21,8 @@ module mac_core #(
     output reg                    done,
 
     // Scratchpad load interface
-    input  wire                   load_a_en,
-    input  wire                   load_b_en,
+    input  wire                   load_en,
+    input  wire                   load_sel,  // 0: A, 1: B
     input  wire [$clog2(N)-1:0]   load_row,
     input  wire [$clog2(N)-1:0]   load_col,
     input  wire [DW-1:0]          load_data,
@@ -135,11 +135,11 @@ module mac_core #(
         end else begin
             done <= 1'b0;
 
-            if (!busy) begin
-                if (load_a_en)
-                    a_spm[load_row][load_col] <= load_data;
-                if (load_b_en)
+            if (load_en && !busy) begin
+                if (load_sel)
                     b_spm[load_row][load_col] <= load_data[2:0];
+                else
+                    a_spm[load_row][load_col] <= load_data;
             end
 
             case (state)
