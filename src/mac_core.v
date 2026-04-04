@@ -9,8 +9,10 @@
 // acc[] doubles as c_spm after done.
 
 module mac_core #(
+    parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 13
+    parameter CW = 13,
+    parameter LANES = 8
 ) (
     input  wire                   clk,
     input  wire                   rst,
@@ -21,23 +23,23 @@ module mac_core #(
     // Scratchpad load interface
     input  wire                   load_en,
     input  wire                   load_sel,  // 0: A, 1: B
-    input  wire [1:0]             load_row,
-    input  wire [1:0]             load_col,
+    input  wire [$clog2(N)-1:0]   load_row,
+    input  wire [$clog2(N)-1:0]   load_col,
     input  wire [DW-1:0]          load_data,
 
     // Result read interface (valid after done; reads acc[] directly)
     input  wire                   c_rd_en,
-    input  wire [1:0]             c_rd_row,
-    input  wire [1:0]             c_rd_col,
+    input  wire [$clog2(N)-1:0]   c_rd_row,
+    input  wire [$clog2(N)-1:0]   c_rd_col,
     output reg  [CW-1:0]          c_rd_data
 );
 
-    localparam ROW_W = 2;
-    localparam OUTS  = 16;
-    localparam OUT_W = 4;
-    localparam LANES = 8;
-    localparam GRPS  = 2;
-    localparam GRP_W = 1;
+    localparam ROW_W = $clog2(N);
+    localparam OUTS  = N * N;
+    localparam OUT_W = (OUTS <= 1) ? 1 : $clog2(OUTS);
+    localparam GRPS  = (OUTS + LANES - 1) / LANES;
+    localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
+    localparam FULL_GROUPS = ((OUTS % LANES) == 0);
 
     localparam ST_IDLE    = 1'd0;
     localparam ST_COMPUTE = 1'd1;
@@ -45,8 +47,8 @@ module mac_core #(
     reg state;
 
     // Input scratchpads
-    reg [DW-1:0] a_spm [0:3][0:3];
-    reg [2:0]    b_spm [0:3][0:3];
+    reg [DW-1:0] a_spm [0:N-1][0:N-1];
+    reg [2:0]    b_spm [0:N-1][0:N-1];
 
     // Output accumulators — also serve as c_spm after done.
     // acc[row*N + col] holds C[row][col].
@@ -59,8 +61,12 @@ module mac_core #(
     // Combinational result read
     always @(*) begin
         c_rd_data = {CW{1'b0}};
-        if (c_rd_en)
-            c_rd_data = acc[{c_rd_row, c_rd_col}];
+        if (c_rd_en) begin
+            if (N == 4)
+                c_rd_data = acc[{c_rd_row, c_rd_col}];
+            else
+                c_rd_data = acc[c_rd_row * N + c_rd_col];
+        end
     end
 
     // 8-lane outer-product datapath:
@@ -69,6 +75,7 @@ module mac_core #(
     reg [OUT_W-1:0] idx_i;
     reg [ROW_W-1:0] row_i;
     reg [ROW_W-1:0] col_i;
+    reg                 lane_valid [0:LANES-1];
     reg [OUT_W-1:0]     lane_idx   [0:LANES-1];
     reg [2:0]           b_val      [0:LANES-1];
     reg [DW+1:0]        a_scaled   [0:LANES-1];
@@ -76,28 +83,43 @@ module mac_core #(
 
     always @(*) begin
         for (l_comb = 0; l_comb < LANES; l_comb = l_comb + 1) begin
-            idx_i = {grp, l_comb[2:0]};
-            row_i = idx_i[3:2];
-            col_i = idx_i[1:0];
+            // Fast path for the actual instantiated configuration (N=4, LANES=8):
+            // avoids generic divide/multiply/index-range logic in the hot datapath.
+            if (N == 4 && LANES == 8) begin
+                idx_i = {grp, l_comb[2:0]};
+                row_i = idx_i[3:2];
+                col_i = idx_i[1:0];
+            end else begin
+                idx_i = grp * LANES + l_comb;
+                row_i = idx_i / N;
+                col_i = idx_i - (row_i * N);
+            end
+
+            if (FULL_GROUPS)
+                lane_valid[l_comb] = 1'b1;
+            else
+                lane_valid[l_comb] = (idx_i < OUTS);
             lane_idx[l_comb]   = idx_i;
             b_val[l_comb]      = 3'b000;
             a_scaled[l_comb]   = {(DW+2){1'b0}};
             pe_next[l_comb]    = {CW{1'b0}};
 
-            b_val[l_comb] = b_spm[ck][col_i];
+            if (lane_valid[l_comb]) begin
+                b_val[l_comb] = b_spm[ck][col_i];
 
-            // Shift-add: magnitude 0→0, 1→A, 2→A<<1, 3→(A<<1)+A
-            case (b_val[l_comb][1:0])
-                2'b01: a_scaled[l_comb] = {2'b0,  a_spm[row_i][ck]};
-                2'b10: a_scaled[l_comb] = {1'b0,  a_spm[row_i][ck], 1'b0};
-                2'b11: a_scaled[l_comb] = {1'b0,  a_spm[row_i][ck], 1'b0}
-                                        + {2'b0,  a_spm[row_i][ck]};
-                default: a_scaled[l_comb] = {(DW+2){1'b0}};
-            endcase
+                // Shift-add: magnitude 0→0, 1→A, 2→A<<1, 3→(A<<1)+A
+                case (b_val[l_comb][1:0])
+                    2'b01: a_scaled[l_comb] = {2'b0,  a_spm[row_i][ck]};
+                    2'b10: a_scaled[l_comb] = {1'b0,  a_spm[row_i][ck], 1'b0};
+                    2'b11: a_scaled[l_comb] = {1'b0,  a_spm[row_i][ck], 1'b0}
+                                            + {2'b0,  a_spm[row_i][ck]};
+                    default: a_scaled[l_comb] = {(DW+2){1'b0}};
+                endcase
 
-            pe_next[l_comb] = acc[lane_idx[l_comb]] + (b_val[l_comb][2]
-                ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]})
-                :  $signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]}));
+                pe_next[l_comb] = acc[lane_idx[l_comb]] + (b_val[l_comb][2]
+                    ? -$signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]})
+                    :  $signed({{(CW-DW-2){1'b0}}, a_scaled[l_comb]}));
+            end
         end
     end
 
@@ -134,12 +156,13 @@ module mac_core #(
 
                 ST_COMPUTE: begin
                     for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
-                        acc[lane_idx[l_seq]] <= pe_next[l_seq];
+                        if (lane_valid[l_seq])
+                            acc[lane_idx[l_seq]] <= pe_next[l_seq];
                     end
 
-                    if (grp == 1'b1) begin
+                    if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
                         grp <= {GRP_W{1'b0}};
-                        if (ck == 2'd3) begin
+                        if (ck == N[ROW_W-1:0] - 1'b1) begin
                             busy  <= 1'b0;
                             done  <= 1'b1;
                             state <= ST_IDLE;
