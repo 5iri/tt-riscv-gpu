@@ -41,11 +41,6 @@ module mac_core #(
     localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
     localparam FULL_GROUPS = ((OUTS % LANES) == 0);
 
-    localparam ST_IDLE    = 1'd0;
-    localparam ST_COMPUTE = 1'd1;
-
-    reg state;
-
     // Input scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
     reg [2:0]    b_spm [0:N-1][0:N-1];
@@ -125,57 +120,52 @@ module mac_core #(
 
     integer p_seq;
     integer l_seq;
+
+    // Keep async reset only on control registers; datapath FFs are initialized on start.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
             ck    <= {ROW_W{1'b0}};
             grp   <= {GRP_W{1'b0}};
         end else begin
             done <= 1'b0;
-
-            if (load_en && !busy) begin
-                if (load_sel)
-                    b_spm[load_row][load_col] <= load_data[2:0];
-                else
-                    a_spm[load_row][load_col] <= load_data;
-            end
-
-            case (state)
-                ST_IDLE: begin
-                    if (start) begin
-                        busy  <= 1'b1;
-                        ck    <= {ROW_W{1'b0}};
-                        grp   <= {GRP_W{1'b0}};
-                        for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
-                            acc[p_seq] <= {CW{1'b0}};
-                        state <= ST_COMPUTE;
-                    end
-                end
-
-                ST_COMPUTE: begin
-                    for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
-                        if (lane_valid[l_seq])
-                            acc[lane_idx[l_seq]] <= pe_next[l_seq];
-                    end
-
-                    if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
-                        grp <= {GRP_W{1'b0}};
-                        if (ck == N[ROW_W-1:0] - 1'b1) begin
-                            busy  <= 1'b0;
-                            done  <= 1'b1;
-                            state <= ST_IDLE;
-                        end else begin
-                            ck <= ck + 1'b1;
-                        end
+            if (start && !busy) begin
+                busy <= 1'b1;
+                ck   <= {ROW_W{1'b0}};
+                grp  <= {GRP_W{1'b0}};
+            end else if (busy) begin
+                if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
+                    grp <= {GRP_W{1'b0}};
+                    if (ck == N[ROW_W-1:0] - 1'b1) begin
+                        busy <= 1'b0;
+                        done <= 1'b1;
                     end else begin
-                        grp <= grp + 1'b1;
+                        ck <= ck + 1'b1;
                     end
+                end else begin
+                    grp <= grp + 1'b1;
                 end
+            end
+        end
+    end
 
-                default: state <= ST_IDLE;
-            endcase
+    always @(posedge clk) begin
+        if (load_en && !busy) begin
+            if (load_sel)
+                b_spm[load_row][load_col] <= load_data[2:0];
+            else
+                a_spm[load_row][load_col] <= load_data;
+        end
+
+        if (start && !busy) begin
+            for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
+                acc[p_seq] <= {CW{1'b0}};
+        end else if (busy) begin
+            for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
+                if (lane_valid[l_seq])
+                    acc[lane_idx[l_seq]] <= pe_next[l_seq];
+            end
         end
     end
 
