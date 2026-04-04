@@ -64,12 +64,12 @@ module tt_um_riscv_gpu (
     wire       wr_is_start = wr_valid && (cmd_sel == 2'b10) && wr_byte[0];
 
     // --- TPU core signals ---
-    wire        core_load_en   = wr_is_mat_a || wr_is_mat_b;
-    wire        core_load_sel  = wr_is_mat_b;
-    wire [1:0]  core_load_row  = cmd_row;
-    wire [1:0]  core_load_col  = cmd_col;
-    wire [7:0]  core_load_data = wr_byte;
-    wire        core_start     = wr_is_start;
+    reg         core_load_en;
+    reg         core_load_sel;
+    reg  [1:0]  core_load_row;
+    reg  [1:0]  core_load_col;
+    reg  [7:0]  core_load_data;
+    reg         core_start;
     wire        core_busy;
     wire        core_done;
     wire [12:0] core_c_data;
@@ -93,6 +93,28 @@ module tt_um_riscv_gpu (
             2'b11:   rd_data = {{11{core_c_data[12]}}, core_c_data};
             default: rd_data = 24'b0;
         endcase
+    end
+
+    // --- Write handling ---
+    // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
+    // Keep only one-cycle pulse controls reset-sensitive.
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            core_load_en <= 1'b0;
+            core_start   <= 1'b0;
+        end else begin
+            core_load_en <= wr_is_mat_a || wr_is_mat_b;
+            core_start   <= wr_is_start;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (wr_is_mat_a || wr_is_mat_b) begin
+            core_load_sel  <= wr_is_mat_b;
+            core_load_row  <= cmd_row;
+            core_load_col  <= cmd_col;
+            core_load_data <= wr_byte;
+        end
     end
 
     // --- SPI slave ---
