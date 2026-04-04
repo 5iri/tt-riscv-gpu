@@ -136,7 +136,7 @@ module tt_um_riscv_gpu (
         .N  (4),
         .DW (8),
         .CW (13),
-        .LANES (8)
+        .LANES (4)
     ) u_core (
         .clk       (clk),
         .rst       (rst),

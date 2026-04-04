@@ -3,9 +3,9 @@
 // Outer-product W3A8 matrix multiply core: 4x4 uint8 activations (A) x 3-bit sign-magnitude weights (B).
 // B encoding: bit[2]=sign, bits[1:0]=magnitude {0,1,2,3} → value {0,+1,+2,+3} or negated.
 //
-// 8-lane outer-product engine:
+// LANES-wide outer-product engine:
 // - Each k-step is processed in groups of LANES outputs.
-// - For N=4 and LANES=8, computation takes N * (16/8) = 8 cycles.
+// - For N=4 and LANES=4, computation takes N * (16/4) = 16 cycles.
 // acc[] doubles as c_spm after done.
 
 module mac_core #(
@@ -83,10 +83,13 @@ module mac_core #(
 
     always @(*) begin
         for (l_comb = 0; l_comb < LANES; l_comb = l_comb + 1) begin
-            // Fast path for the actual instantiated configuration (N=4, LANES=8):
-            // avoids generic divide/multiply/index-range logic in the hot datapath.
+            // Fast paths for known configurations (N=4): avoids divide/multiply in synthesis.
             if (N == 4 && LANES == 8) begin
                 idx_i = {grp, l_comb[2:0]};
+                row_i = idx_i[3:2];
+                col_i = idx_i[1:0];
+            end else if (N == 4 && LANES == 4) begin
+                idx_i = {grp[1:0], l_comb[1:0]};
                 row_i = idx_i[3:2];
                 col_i = idx_i[1:0];
             end else begin
