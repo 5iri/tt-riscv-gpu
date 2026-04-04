@@ -50,14 +50,12 @@ module tt_um_riscv_gpu (
     wire spi_miso;
 
     // --- SPI slave <-> register bus ---
-    wire        cmd_valid;
     wire [7:0]  cmd_byte;
     wire        wr_valid;
     wire [7:0]  wr_byte;
     reg  [23:0] rd_data;
 
     // --- Command decode ---
-    wire       cmd_is_read = cmd_byte[7];
     wire [1:0] cmd_sel     = cmd_byte[6:5];
     wire [1:0] cmd_row     = cmd_byte[4:3];
     wire [1:0] cmd_col     = cmd_byte[2:1];
@@ -127,7 +125,6 @@ module tt_um_riscv_gpu (
         .spi_cs_n  (spi_cs_n),
         .spi_mosi  (spi_mosi),
         .spi_miso  (spi_miso),
-        .cmd_valid (cmd_valid),
         .cmd_byte  (cmd_byte),
         .wr_valid  (wr_valid),
         .wr_byte   (wr_byte),
