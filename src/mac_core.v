@@ -5,7 +5,7 @@
 //
 // LANES-wide outer-product engine:
 // - Each k-step is processed in groups of LANES outputs.
-// - For N=4 and LANES=4, computation takes N * (16/4) = 16 cycles.
+// - For N=4 and LANES=4, computation takes N * (16/4) + 1 = 17 cycles (pipeline flush).
 // acc[] doubles as c_spm after done.
 
 module mac_core #(
@@ -41,10 +41,21 @@ module mac_core #(
     localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
     localparam FULL_GROUPS = ((OUTS % LANES) == 0);
 
-    localparam ST_IDLE    = 1'd0;
-    localparam ST_COMPUTE = 1'd1;
+    localparam ST_IDLE    = 2'd0;
+    localparam ST_COMPUTE = 2'd1;
+    localparam ST_FLUSH   = 2'd2;
 
-    reg state;
+    reg [1:0] state;
+
+    // Pipeline stage registers: decouple pe_next compute from acc write.
+    // Stage 1 (ST_COMPUTE): latch pe_next into pipe_pe.
+    // Stage 2 (next cycle):  write pipe_pe to acc.
+    // This breaks the large a_spm/b_spm/acc combinational cone into two
+    // smaller cones, reducing local routing density in the MAC array.
+    reg signed [CW-1:0] pipe_pe    [0:LANES-1];
+    reg [OUT_W-1:0]     pipe_idx   [0:LANES-1];
+    reg                 pipe_valid [0:LANES-1];
+    reg                 pipe_en;
 
     // Input scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
@@ -69,7 +80,7 @@ module mac_core #(
         end
     end
 
-    // 8-lane outer-product datapath:
+    // LANES-wide outer-product datapath (combinational stage 1 only; acc write in stage 2):
     // for lane l, global output index p = grp*LANES + l.
     integer l_comb;
     reg [OUT_W-1:0] idx_i;
@@ -130,11 +141,12 @@ module mac_core #(
     integer l_seq;
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            state <= ST_IDLE;
-            busy  <= 1'b0;
-            done  <= 1'b0;
-            ck    <= {ROW_W{1'b0}};
-            grp   <= {GRP_W{1'b0}};
+            state   <= ST_IDLE;
+            busy    <= 1'b0;
+            done    <= 1'b0;
+            pipe_en <= 1'b0;
+            ck      <= {ROW_W{1'b0}};
+            grp     <= {GRP_W{1'b0}};
         end else begin
             done <= 1'b0;
 
@@ -145,12 +157,22 @@ module mac_core #(
                     a_spm[load_row][load_col] <= load_data;
             end
 
+            // Pipeline stage 2: write latched results to acc.
+            // pipe_en is 0 during ST_IDLE, so this never conflicts with acc clear.
+            if (pipe_en) begin
+                for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
+                    if (pipe_valid[l_seq])
+                        acc[pipe_idx[l_seq]] <= pipe_pe[l_seq];
+                end
+            end
+
             case (state)
                 ST_IDLE: begin
                     if (start) begin
-                        busy  <= 1'b1;
-                        ck    <= {ROW_W{1'b0}};
-                        grp   <= {GRP_W{1'b0}};
+                        busy    <= 1'b1;
+                        pipe_en <= 1'b0;
+                        ck      <= {ROW_W{1'b0}};
+                        grp     <= {GRP_W{1'b0}};
                         for (p_seq = 0; p_seq < OUTS; p_seq = p_seq + 1)
                             acc[p_seq] <= {CW{1'b0}};
                         state <= ST_COMPUTE;
@@ -158,23 +180,33 @@ module mac_core #(
                 end
 
                 ST_COMPUTE: begin
+                    // Pipeline stage 1: latch pe_next (combinational) into pipe regs.
+                    // acc write happens the following cycle via the stage-2 block above.
+                    pipe_en <= 1'b1;
                     for (l_seq = 0; l_seq < LANES; l_seq = l_seq + 1) begin
-                        if (lane_valid[l_seq])
-                            acc[lane_idx[l_seq]] <= pe_next[l_seq];
+                        pipe_pe[l_seq]    <= pe_next[l_seq];
+                        pipe_idx[l_seq]   <= lane_idx[l_seq];
+                        pipe_valid[l_seq] <= lane_valid[l_seq];
                     end
 
                     if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
                         grp <= {GRP_W{1'b0}};
                         if (ck == N[ROW_W-1:0] - 1'b1) begin
-                            busy  <= 1'b0;
-                            done  <= 1'b1;
-                            state <= ST_IDLE;
+                            state <= ST_FLUSH;  // one extra cycle to drain pipeline
                         end else begin
                             ck <= ck + 1'b1;
                         end
                     end else begin
                         grp <= grp + 1'b1;
                     end
+                end
+
+                ST_FLUSH: begin
+                    // Stage-2 block above writes the last batch to acc this cycle.
+                    pipe_en <= 1'b0;
+                    busy    <= 1'b0;
+                    done    <= 1'b1;
+                    state   <= ST_IDLE;
                 end
 
                 default: state <= ST_IDLE;
