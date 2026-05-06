@@ -5,7 +5,7 @@ project:
   discord:      ""
   description:  "SPI-controlled 4x4 W1.58A8 matrix multiply accelerator (BitNet b1.58): uint8 activations x ternary {-1,0,+1} weights, multiplier-free PE-parallel MAC"
   language:     "Verilog"
-  clock_hz:     200000000
+  clock_hz:     150000000
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "1x2"
