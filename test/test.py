@@ -6,20 +6,22 @@ from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
 # SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
-# SEL: 00=A (uint8), 01=B (3-bit sign-magnitude), 10=ctrl/status, 11=C (13-bit signed)
-# W3A8: weights in {-3,-2,-1,0,+1,+2,+3}, activations uint8
+# SEL: 00=A (uint8), 01=B (ternary, 2-bit), 10=ctrl/status, 11=C (12-bit signed)
+# BitNet b1.58 W1.58A8: weights in {-1, 0, +1}, activations uint8
 
 def make_cmd(rw, sel, row, col):
     return ((rw & 1) << 7) | ((sel & 3) << 5) | ((row & 3) << 3) | ((col & 3) << 1)
 
 
-def encode_weight(value):
-    """Encode weight {-3..+3} into 3-bit sign-magnitude (bit2=sign, bits[1:0]=magnitude)."""
-    if value < -3 or value > 3:
-        raise ValueError(f"Weight {value} out of range -3..+3")
-    mag = abs(value)
-    sign = 1 if value < 0 else 0
-    return (sign << 2) | mag
+def encode_ternary_weight(value):
+    """Encode ternary weight {-1, 0, +1} into 2-bit code."""
+    if value == 0:
+        return 0x00  # 00
+    if value == 1:
+        return 0x01  # 01
+    if value == -1:
+        return 0x02  # 10
+    raise ValueError(f"Unsupported ternary value {value}, expected -1/0/1")
 
 
 def to_signed(value, width):
@@ -39,7 +41,7 @@ async def spi_transfer(dut, cmd_byte, write_bytes=None, read_count=0):
     read_result = []
 
     # Assert CS_N low
-    ui = dut.ui_in.value.to_unsigned()
+    ui = dut.ui_in.value.integer
     ui &= ~(1 << CS_N_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 4)
@@ -59,7 +61,7 @@ async def spi_transfer(dut, cmd_byte, write_bytes=None, read_count=0):
 
     # Deassert CS_N high
     await ClockCycles(dut.clk, 2)
-    ui = dut.ui_in.value.to_unsigned()
+    ui = dut.ui_in.value.integer
     ui |= (1 << CS_N_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 4)
@@ -71,7 +73,7 @@ async def _spi_send_byte(dut, byte_val):
     """Clock out 8 bits on MOSI, MSB first."""
     for i in range(7, -1, -1):
         bit = (byte_val >> i) & 1
-        ui = dut.ui_in.value.to_unsigned()
+        ui = dut.ui_in.value.integer
         # Set MOSI
         if bit:
             ui |= (1 << MOSI_BIT)
@@ -87,30 +89,17 @@ async def _spi_send_byte(dut, byte_val):
         await ClockCycles(dut.clk, 4)
 
     # SCLK low after byte
-    ui = dut.ui_in.value.to_unsigned()
+    ui = dut.ui_in.value.integer
     ui &= ~(1 << SCLK_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 2)
-
-
-async def _sample_miso_bit(dut):
-    """Sample MISO bit only; tolerate brief gate-level X/Z transients."""
-    for _ in range(3):
-        bit = str(dut.uo_out.value[0])
-        if bit == "0":
-            return 0
-        if bit == "1":
-            return 1
-        await ClockCycles(dut.clk, 1)
-
-    raise AssertionError(f"MISO unresolved after retries: uo_out={dut.uo_out.value.binstr}")
 
 
 async def _spi_read_byte(dut):
     """Clock in 8 bits from MISO, MSB first."""
     byte_val = 0
     for i in range(7, -1, -1):
-        ui = dut.ui_in.value.to_unsigned()
+        ui = dut.ui_in.value.integer
         # SCLK low (falling edge — slave drives MISO)
         ui &= ~(1 << SCLK_BIT)
         dut.ui_in.value = ui
@@ -120,11 +109,11 @@ async def _spi_read_byte(dut):
         dut.ui_in.value = ui
         await ClockCycles(dut.clk, 4)
         # Sample MISO (uo_out[0])
-        miso = await _sample_miso_bit(dut)
+        miso = (dut.uo_out.value.integer >> 0) & 1
         byte_val = (byte_val << 1) | miso
 
     # SCLK low after byte
-    ui = dut.ui_in.value.to_unsigned()
+    ui = dut.ui_in.value.integer
     ui &= ~(1 << SCLK_BIT)
     dut.ui_in.value = ui
     await ClockCycles(dut.clk, 2)
@@ -133,18 +122,18 @@ async def _spi_read_byte(dut):
 
 
 async def spi_write_matrix(dut, sel, matrix):
-    """Write a 4x4 matrix (sel=0 for uint8 A, sel=1 for 3-bit weight B)."""
+    """Write a 4x4 matrix (sel=0 for uint8 A, sel=1 for ternary B)."""
     for r in range(4):
         for c in range(4):
             cmd = make_cmd(0, sel, r, c)
             value = matrix[r][c]
             if sel == 1:
-                value = encode_weight(value)
+                value = encode_ternary_weight(value)
             await spi_transfer(dut, cmd, write_bytes=[value & 0xFF])
 
 
 async def spi_read_c(dut, row, col):
-    """Read a 13-bit signed C element from 3 SPI bytes (sign-extended to 24 bits)."""
+    """Read a 12-bit signed C element from 3 SPI bytes (sign-extended to 24 bits)."""
     cmd = make_cmd(1, 3, row, col)
     result = await spi_transfer(dut, cmd, read_count=3)
     raw = (result[0] << 16) | (result[1] << 8) | result[2]
@@ -165,7 +154,7 @@ async def spi_read_status(dut):
 
 
 def matmul_4x4(a, b):
-    """Reference 4x4 matrix multiply (uint8 A, W3 weights B in {-3..+3})."""
+    """Reference 4x4 matrix multiply (uint8 A, ternary B in {-1, 0, +1})."""
     c = [[0]*4 for _ in range(4)]
     for i in range(4):
         for j in range(4):
@@ -179,9 +168,6 @@ async def test_identity(dut):
     """Multiply by identity matrix."""
     dut._log.info("Start identity test")
 
-    # Ensure deterministic clock startup for gate-level runs.
-    dut.clk.value = 0
-    dut.rst_n.value = 0
     clock = Clock(dut.clk, 20, unit="ns")  # 50 MHz
     cocotb.start_soon(clock.start())
 
@@ -189,6 +175,7 @@ async def test_identity(dut):
     dut.ena.value = 1
     dut.ui_in.value = (1 << CS_N_BIT)  # CS_N high, others low
     dut.uio_in.value = 0
+    dut.rst_n.value = 0
     await ClockCycles(dut.clk, 20)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
@@ -198,7 +185,7 @@ async def test_identity(dut):
          [9,  10, 11, 12],
          [13, 14, 15, 16]]
 
-    # Identity matrix (valid W3 weights: all 0 or +1)
+    # Ternary identity matrix
     B = [[1, 0, 0, 0],
          [0, 1, 0, 0],
          [0, 0, 1, 0],
@@ -234,12 +221,9 @@ async def test_identity(dut):
 
 @cocotb.test()
 async def test_matmul(dut):
-    """General matrix multiply with 3-bit weights {-3..+3}."""
+    """General matrix multiply with ternary weights."""
     dut._log.info("Start matmul test")
 
-    # Ensure deterministic clock startup for gate-level runs.
-    dut.clk.value = 0
-    dut.rst_n.value = 0
     clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
 
@@ -247,19 +231,20 @@ async def test_matmul(dut):
     dut.ena.value = 1
     dut.ui_in.value = (1 << CS_N_BIT)
     dut.uio_in.value = 0
+    dut.rst_n.value = 0
     await ClockCycles(dut.clk, 20)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 10)
 
-    A = [[  2,  3,  1,  4],
-         [  5,  1,  0,  2],
-         [  3,  7,  2,  1],
-         [  0,  6,  4,  3]]
+    A = [[2, 3, 1, 4],
+         [5, 1, 0, 2],
+         [3, 7, 2, 1],
+         [0, 6, 4, 3]]
 
-    B = [[ 3,  0, -1,  2],
-         [ 0,  2,  1, -3],
-         [-2,  1,  0,  1],
-         [ 1, -1,  3,  0]]
+    B = [[1,  0, -1,  1],
+         [0,  1,  1, -1],
+         [-1, 1,  0,  1],
+         [1, -1,  1,  0]]
 
     expected = matmul_4x4(A, B)
 

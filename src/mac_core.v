@@ -1,21 +1,20 @@
 `timescale 1ns/1ps
 
-// Outer-product W3A8 matrix multiply core: 4x4 uint8 activations (A) x 3-bit sign-magnitude weights (B).
-// B encoding: bit[2]=sign, bits[1:0]=magnitude {0,1,2,3} → value {0,+1,+2,+3} or negated.
+// BitNet b1.58-style matrix multiply core: 4x4 uint8 activations (A) x ternary weights (B).
+// B encoding (W1.58A8):
+//   2'b00 =>  0
+//   2'b01 => +1
+//   2'b10 => -1
+//   2'b11 =>  0 (reserved -> treated as zero)
 //
-// LANES-wide outer-product engine using per-lane generate blocks (assumes LANES <= N).
-// For N=4 and LANES=4:
-//   - One shared a_spm[grp][ck] read, broadcast to all lanes (was 4 identical mux chains).
-//   - Each lane reads b_spm[ck][l] with compile-time column l (no col_i runtime mux).
-//   - Accumulators split into per-lane columns: acc_col[l][row], each lane independent.
-//   - Each acc register has its own always block (16 independent write enables on grp).
-//   - Computation takes N * (N*N/LANES) = 16 cycles.
+// Datapath removes multiplication and uses add/sub/skip only.
+// Multiple output lanes (PE) run in parallel to improve throughput.
 
 module mac_core #(
     parameter N  = 4,
     parameter DW = 8,
-    parameter CW = 13,
-    parameter LANES = 8
+    parameter CW = 12,
+    parameter PE = 2
 ) (
     input  wire                   clk,
     input  wire                   rst,
@@ -30,7 +29,7 @@ module mac_core #(
     input  wire [$clog2(N)-1:0]   load_col,
     input  wire [DW-1:0]          load_data,
 
-    // Result read interface (valid after done)
+    // Result read interface
     input  wire                   c_rd_en,
     input  wire [$clog2(N)-1:0]   c_rd_row,
     input  wire [$clog2(N)-1:0]   c_rd_col,
@@ -39,98 +38,91 @@ module mac_core #(
 
     localparam ROW_W = $clog2(N);
     localparam OUTS  = N * N;
-    localparam GRPS  = (OUTS + LANES - 1) / LANES;
-    localparam GRP_W = (GRPS <= 1) ? 1 : $clog2(GRPS);
+    localparam OUT_W = $clog2(OUTS);
 
-    localparam ST_IDLE    = 1'd0;
-    localparam ST_COMPUTE = 1'd1;
+    localparam [1:0] ST_IDLE    = 2'd0;
+    localparam [1:0] ST_COMPUTE = 2'd1;
+    localparam [1:0] ST_DONE    = 2'd2;
 
-    reg state;
+    reg [1:0] state;
 
-    // Input scratchpads
+    // Scratchpads
     reg [DW-1:0] a_spm [0:N-1][0:N-1];
-    reg [2:0]    b_spm [0:N-1][0:N-1];
+    reg [1:0]    b_spm [0:N-1][0:N-1];
+    reg [CW-1:0] c_spm [0:N-1][0:N-1];
 
-    // Per-lane accumulator columns: acc_col[lane][row] = C[row][lane].
-    // Splitting by column keeps each lane's state physically independent.
-    reg signed [CW-1:0] acc_col [0:LANES-1][0:N-1];
-
-    // Compute counters
+    // Loop counters
     reg [ROW_W-1:0] ck;
-    reg [GRP_W-1:0] grp;
+    reg [OUT_W-1:0] co;  // Flat output index base for current PE batch
 
-    // Shared A read: all lanes use the same A element each cycle.
-    // One 16:1 mux instance shared across all LANES (was one copy per lane).
-    wire [DW-1:0] a_val = a_spm[grp][ck];
+    // Per-lane accumulators and datapath signals
+    reg signed [CW-1:0] acc      [0:PE-1];
+    reg signed [CW-1:0] pe_term  [0:PE-1];
+    reg signed [CW-1:0] pe_next  [0:PE-1];
+    reg                 pe_valid [0:PE-1];
+    reg [ROW_W-1:0]     pe_row   [0:PE-1];
+    reg [ROW_W-1:0]     pe_col   [0:PE-1];
 
-    // Result read: column = lane index, row selected by c_rd_row.
+    integer i, j;
+    integer p_comb, p_seq;
+    reg [OUT_W:0] flat_idx;
+
+    // Combinational read
     always @(*) begin
         c_rd_data = {CW{1'b0}};
         if (c_rd_en)
-            c_rd_data = acc_col[c_rd_col][c_rd_row];
+            c_rd_data = c_spm[c_rd_row][c_rd_col];
     end
 
-    // Per-lane generate: each lane handles one fixed column of C.
-    // Per-row inner generate: each acc register gets its own always block
-    // with a static write-enable (grp == r), avoiding a shared write mux.
-    genvar l, r;
-    generate
-        for (l = 0; l < LANES; l = l + 1) begin : lane_g
+    // Per-lane ternary add/sub datapath (no multiplier)
+    always @(*) begin
+        for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
+            flat_idx = {1'b0, co} + p_comb;
+            pe_valid[p_comb] = (flat_idx < OUTS);
+            pe_row[p_comb]   = {ROW_W{1'b0}};
+            pe_col[p_comb]   = {ROW_W{1'b0}};
+            pe_term[p_comb]  = {CW{1'b0}};
+            pe_next[p_comb]  = acc[p_comb];
 
-            // B weight for this lane's column — static index l, no col_i mux.
-            wire [2:0] bw = b_spm[ck][l];
+            if (pe_valid[p_comb]) begin
+                pe_row[p_comb] = flat_idx[OUT_W-1:ROW_W];
+                pe_col[p_comb] = flat_idx[ROW_W-1:0];
 
-            // Shift-add: A scaled by B magnitude. No multiplier needed.
-            reg [DW+1:0] a_sc;
-            always @(*) begin
-                case (bw[1:0])
-                    2'b01: a_sc = {2'b0,  a_val};
-                    2'b10: a_sc = {1'b0,  a_val, 1'b0};
-                    2'b11: a_sc = {1'b0,  a_val, 1'b0} + {2'b0, a_val};
-                    default: a_sc = {(DW+2){1'b0}};
+                case (b_spm[ck][pe_col[p_comb]])
+                    2'b01: pe_term[p_comb] = $signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    2'b10: pe_term[p_comb] = -$signed({{(CW-DW){1'b0}}, a_spm[pe_row[p_comb]][ck]});
+                    default: pe_term[p_comb] = {CW{1'b0}};
                 endcase
+
+                pe_next[p_comb] = acc[p_comb] + pe_term[p_comb];
             end
-
-            // Current accumulator row for this lane (4:1 mux on grp).
-            wire signed [CW-1:0] acc_cur = acc_col[l][grp];
-
-            // MAC: accumulate signed scaled A into running sum.
-            wire signed [CW-1:0] pe_next = acc_cur + (bw[2]
-                ? -$signed({{(CW-DW-2){1'b0}}, a_sc})
-                :  $signed({{(CW-DW-2){1'b0}}, a_sc}));
-
-            // Per-row sequential update: one always block per accumulator register.
-            // Write enable is (state==ST_COMPUTE && grp==r) — a static equality per r.
-            for (r = 0; r < N; r = r + 1) begin : row_g
-                always @(posedge clk or posedge rst) begin
-                    if (rst) begin
-                        acc_col[l][r] <= {CW{1'b0}};
-                    end else if (start && (state == ST_IDLE)) begin
-                        acc_col[l][r] <= {CW{1'b0}};
-                    end else if ((state == ST_COMPUTE) && (grp == r)) begin
-                        acc_col[l][r] <= pe_next;
-                    end
-                end
-            end
-
         end
-    endgenerate
+    end
 
-    // Main FSM: state, counters, scratchpad loads.
-    // Accumulator writes handled entirely by the generate blocks above.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             state <= ST_IDLE;
             busy  <= 1'b0;
             done  <= 1'b0;
             ck    <= {ROW_W{1'b0}};
-            grp   <= {GRP_W{1'b0}};
+            co    <= {OUT_W{1'b0}};
+
+            for (i = 0; i < N; i = i + 1)
+                for (j = 0; j < N; j = j + 1) begin
+                    a_spm[i][j] <= {DW{1'b0}};
+                    b_spm[i][j] <= 2'b00;
+                    c_spm[i][j] <= {CW{1'b0}};
+                end
+
+            for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
+                acc[p_seq] <= {CW{1'b0}};
         end else begin
             done <= 1'b0;
 
+            // Load scratchpads when idle
             if (load_en && !busy) begin
                 if (load_sel)
-                    b_spm[load_row][load_col] <= load_data[2:0];
+                    b_spm[load_row][load_col] <= load_data[1:0];
                 else
                     a_spm[load_row][load_col] <= load_data;
             end
@@ -138,26 +130,46 @@ module mac_core #(
             case (state)
                 ST_IDLE: begin
                     if (start) begin
-                        busy  <= 1'b1;
-                        ck    <= {ROW_W{1'b0}};
-                        grp   <= {GRP_W{1'b0}};
+                        busy <= 1'b1;
+                        ck   <= {ROW_W{1'b0}};
+                        co   <= {OUT_W{1'b0}};
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1)
+                            acc[p_seq] <= {CW{1'b0}};
                         state <= ST_COMPUTE;
                     end
                 end
 
                 ST_COMPUTE: begin
-                    if (grp == GRPS[GRP_W-1:0] - 1'b1) begin
-                        grp <= {GRP_W{1'b0}};
-                        if (ck == N[ROW_W-1:0] - 1'b1) begin
+                    if (ck == N[ROW_W-1:0] - 1'b1) begin
+                        // Dot-product end for all active lanes: store and reset lane accumulators.
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                            if (pe_valid[p_seq])
+                                c_spm[pe_row[p_seq]][pe_col[p_seq]] <= pe_next[p_seq];
+                            acc[p_seq] <= {CW{1'b0}};
+                        end
+
+                        ck <= {ROW_W{1'b0}};
+
+                        if ((co + PE) >= OUTS) begin
                             busy  <= 1'b0;
                             done  <= 1'b1;
-                            state <= ST_IDLE;
+                            state <= ST_DONE;
                         end else begin
-                            ck <= ck + 1'b1;
+                            co <= co + PE;
                         end
                     end else begin
-                        grp <= grp + 1'b1;
+                        ck <= ck + 1'b1;
+                        for (p_seq = 0; p_seq < PE; p_seq = p_seq + 1) begin
+                            if (pe_valid[p_seq])
+                                acc[p_seq] <= pe_next[p_seq];
+                            else
+                                acc[p_seq] <= {CW{1'b0}};
+                        end
                     end
+                end
+
+                ST_DONE: begin
+                    state <= ST_IDLE;
                 end
 
                 default: state <= ST_IDLE;

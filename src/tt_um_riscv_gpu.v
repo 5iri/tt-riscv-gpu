@@ -1,8 +1,8 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// TinyTapeout top wrapper for 4x4 W3A8 matrix multiply accelerator.
-// Weights (B) are 3-bit sign-magnitude {-3..+3}; activations (A) are uint8. No multipliers needed.
+// TinyTapeout top wrapper for BitNet b1.58-style 4x4 matrix multiply accelerator (W1.58A8).
+// Weights (B) are ternary {-1, 0, +1}; activations (A) are uint8. No multipliers needed.
 //
 // Pin map:
 //   ui_in[0]  = SPI SCLK
@@ -19,11 +19,11 @@
 //
 // SPI command byte: {R/W[7], SEL[6:5], ROW[4:3], COL[2:1], 0}
 //   SEL 00 = write matrix A element   (1 data byte, uint8)
-//   SEL 01 = write matrix B element   (1 data byte, bits [2:0]: sign-magnitude, bit2=sign, bits[1:0]=mag 0-3)
+//   SEL 01 = write matrix B element   (1 data byte, bits [1:0]: 00=0, 01=+1, 10=-1)
 //   SEL 10 = control / status
 //            write: bit 0 = start      (1 data byte)
 //            read:  {6'b0, done, busy}  (1 byte out)
-//   SEL 11 = read matrix C element    (3 bytes out, MSB first, 13-bit signed)
+//   SEL 11 = read matrix C element    (3 bytes out, MSB first, 12-bit signed)
 
 module tt_um_riscv_gpu (
     input  wire [7:0] ui_in,
@@ -50,18 +50,17 @@ module tt_um_riscv_gpu (
     wire spi_miso;
 
     // --- SPI slave <-> register bus ---
+    wire        cmd_valid;
     wire [7:0]  cmd_byte;
     wire        wr_valid;
     wire [7:0]  wr_byte;
     reg  [23:0] rd_data;
 
     // --- Command decode ---
+    wire       cmd_is_read = cmd_byte[7];
     wire [1:0] cmd_sel     = cmd_byte[6:5];
     wire [1:0] cmd_row     = cmd_byte[4:3];
     wire [1:0] cmd_col     = cmd_byte[2:1];
-    wire       wr_is_mat_a = wr_valid && (cmd_sel == 2'b00);
-    wire       wr_is_mat_b = wr_valid && (cmd_sel == 2'b01);
-    wire       wr_is_start = wr_valid && (cmd_sel == 2'b10) && wr_byte[0];
 
     // --- TPU core signals ---
     reg         core_load_en;
@@ -72,7 +71,7 @@ module tt_um_riscv_gpu (
     reg         core_start;
     wire        core_busy;
     wire        core_done;
-    wire [12:0] core_c_data;
+    wire [11:0] core_c_data;
 
     // --- Sticky done flag ---
     reg done_sticky;
@@ -90,30 +89,47 @@ module tt_um_riscv_gpu (
     always @(*) begin
         case (cmd_sel)
             2'b10:   rd_data = {6'b0, done_sticky, core_busy, 16'b0};
-            2'b11:   rd_data = {{11{core_c_data[12]}}, core_c_data};
+            2'b11:   rd_data = {{12{core_c_data[11]}}, core_c_data};
             default: rd_data = 24'b0;
         endcase
     end
 
     // --- Write handling ---
-    // core_load_sel/row/col/data: only sampled when core_load_en=1, so no reset needed.
-    // Keep only one-cycle pulse controls reset-sensitive.
     always @(posedge clk or posedge rst) begin
         if (rst) begin
+            core_load_en   <= 1'b0;
+            core_load_sel  <= 1'b0;
+            core_load_row  <= 2'b0;
+            core_load_col  <= 2'b0;
+            core_load_data <= 8'b0;
+            core_start     <= 1'b0;
+        end else begin
             core_load_en <= 1'b0;
             core_start   <= 1'b0;
-        end else begin
-            core_load_en <= wr_is_mat_a || wr_is_mat_b;
-            core_start   <= wr_is_start;
-        end
-    end
 
-    always @(posedge clk) begin
-        if (wr_is_mat_a || wr_is_mat_b) begin
-            core_load_sel  <= wr_is_mat_b;
-            core_load_row  <= cmd_row;
-            core_load_col  <= cmd_col;
-            core_load_data <= wr_byte;
+            if (wr_valid) begin
+                case (cmd_sel)
+                    2'b00: begin   // Matrix A
+                        core_load_en   <= 1'b1;
+                        core_load_sel  <= 1'b0;
+                        core_load_row  <= cmd_row;
+                        core_load_col  <= cmd_col;
+                        core_load_data <= wr_byte;
+                    end
+                    2'b01: begin   // Matrix B (ternary)
+                        core_load_en   <= 1'b1;
+                        core_load_sel  <= 1'b1;
+                        core_load_row  <= cmd_row;
+                        core_load_col  <= cmd_col;
+                        core_load_data <= wr_byte;
+                    end
+                    2'b10: begin   // Control: start
+                        if (wr_byte[0])
+                            core_start <= 1'b1;
+                    end
+                    default: ;
+                endcase
+            end
         end
     end
 
@@ -125,18 +141,21 @@ module tt_um_riscv_gpu (
         .spi_cs_n  (spi_cs_n),
         .spi_mosi  (spi_mosi),
         .spi_miso  (spi_miso),
+        .cmd_valid (cmd_valid),
         .cmd_byte  (cmd_byte),
         .wr_valid  (wr_valid),
         .wr_byte   (wr_byte),
         .rd_data   (rd_data)
     );
 
-    // --- MAC core (W3A8, outer-product with 8 lanes; N=4 takes 8 compute cycles) ---
+    localparam CORE_PE = 2;
+
+    // --- MAC core (BitNet b1.58 W1.58A8, PE-parallel) ---
     mac_core #(
         .N  (4),
         .DW (8),
-        .CW (13),
-        .LANES (4)
+        .CW (12),
+        .PE (CORE_PE)
     ) u_core (
         .clk       (clk),
         .rst       (rst),
