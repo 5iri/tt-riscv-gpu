@@ -148,7 +148,7 @@ module tt_um_riscv_gpu (
         .rd_data   (rd_data)
     );
 
-    localparam CORE_PE = 2;
+    localparam CORE_PE = 4;
 
     // --- MAC core (BitNet b1.58 W1.58A8, PE-parallel) ---
     mac_core #(
