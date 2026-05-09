@@ -27,7 +27,7 @@ module tb ();
   wire VGND = 1'b0;
 `endif
 
-  tt_um_riscv_gpu user_project (
+  tt_um_bitnet_4x4_pe4 user_project (
 
       // Include power ports for the Gate Level test:
 `ifdef GL_TEST

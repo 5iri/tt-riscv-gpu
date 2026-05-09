@@ -25,7 +25,7 @@
 //            read:  {6'b0, done, busy}  (1 byte out)
 //   SEL 11 = read matrix C element    (3 bytes out, MSB first, 12-bit signed)
 
-module tt_um_riscv_gpu (
+module tt_um_bitnet_4x4_pe4 (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
     input  wire [7:0] uio_in,
