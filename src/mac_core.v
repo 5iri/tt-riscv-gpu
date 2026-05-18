@@ -66,6 +66,7 @@ module mac_core #(
     integer i, j;
     integer p_comb, p_seq;
     reg [OUT_W:0] flat_idx;
+    reg [OUT_W:0] lane_offset;
 
     // Combinational read
     always @(*) begin
@@ -77,7 +78,8 @@ module mac_core #(
     // Per-lane ternary add/sub datapath (no multiplier)
     always @(*) begin
         for (p_comb = 0; p_comb < PE; p_comb = p_comb + 1) begin
-            flat_idx = {1'b0, co} + p_comb;
+            lane_offset    = p_comb[OUT_W:0];
+            flat_idx       = {1'b0, co} + lane_offset;
             pe_valid[p_comb] = (flat_idx < OUTS);
             pe_row[p_comb]   = {ROW_W{1'b0}};
             pe_col[p_comb]   = {ROW_W{1'b0}};
@@ -99,7 +101,7 @@ module mac_core #(
         end
     end
 
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             state <= ST_IDLE;
             busy  <= 1'b0;

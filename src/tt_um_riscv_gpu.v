@@ -76,7 +76,7 @@ module tt_um_riscv_gpu (
     // --- Sticky done flag ---
     reg done_sticky;
 
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst)
             done_sticky <= 1'b0;
         else if (core_start)
@@ -95,7 +95,7 @@ module tt_um_riscv_gpu (
     end
 
     // --- Write handling ---
-    always @(posedge clk or posedge rst) begin
+    always @(posedge clk) begin
         if (rst) begin
             core_load_en   <= 1'b0;
             core_load_sel  <= 1'b0;
@@ -178,5 +178,7 @@ module tt_um_riscv_gpu (
     assign uo_out[1]   = core_busy;
     assign uo_out[2]   = done_sticky;
     assign uo_out[7:3] = 5'b0;
+
+    wire _unused = &{1'b0, ui_in[7:3], uio_in, ena, cmd_valid, cmd_byte[0], cmd_is_read, 1'b0};
 
 endmodule

@@ -114,4 +114,6 @@ module spi_slave (
         end
     end
 
+    wire _unused = &{1'b0, shift_in[7], 1'b0};
+
 endmodule
